@@ -38,7 +38,8 @@ beforeEach(async () => {
 describe("answers match the manifest schemas", () => {
   it("every agent op, on the conformance fixture", async () => {
     seedConformance(db);
-    await call("status", {}, agent());
+    const status = await call("status", {}, agent());
+    assert.ok(!JSON.stringify(status).includes("spans"), "agents never get spans");
     await call("job_pause", { jobId: CONFORMANCE.job }, agent());
     await call("flag", { recordId: CONFORMANCE.record, reason: "wrong" }, agent());
     assert.equal((await call("status", {}, agent())).review.waiting, 1);

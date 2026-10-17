@@ -7,6 +7,7 @@ import { createHash, createHmac } from "node:crypto";
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { type ClassifyConfig, classifyText } from "./classify.ts";
 
 export type Row = Record<string, unknown>;
 
@@ -489,28 +490,51 @@ export interface MessageView {
   authorKind: string;
   /** null once purged, after the record's text_purge_at, or when the provider deleted the message */
   text: string | null;
+  /** detected sensitive spans in `text`: classes and offsets only (never the matched value); [] when there is no text */
+  spans: { class: string; start: number; end: number }[];
 }
 /** Record with its messages (person ops only). Text is shown only while inside retention. */
-export function recordDetail(db: Db, r: Row, now: number): RecordView & { messages: MessageView[]; spans: never[] } {
+export function recordDetail(db: Db, r: Row, now: number): RecordView & { messages: MessageView[] } {
   const purgeAt = r.text_purge_at === null || r.text_purge_at === undefined ? null : Number(r.text_purge_at);
   const expired = purgeAt !== null && purgeAt <= now;
   const msgs = db.prepare("SELECT * FROM obs_messages WHERE record_id = ? ORDER BY sent_at, provider_msg_id LIMIT 500").all(str(r.id));
+  const cfg = loadClassifierConfig(db);
   return {
     ...recordView(r),
-    messages: msgs.map((m) => ({
-      conversation: str(m.conversation),
-      id: str(m.provider_msg_id),
-      thread: strOrNull(m.thread),
-      sentAt: iso(m.sent_at),
-      editedAt: iso(m.edited_at),
-      deleted: Number(m.deleted) === 1,
-      author: str(m.author_ref),
-      authorKind: str(m.author_kind),
-      text: expired || Number(m.deleted) === 1 || m.text === null ? null : str(m.text),
-    })),
-    // TODO(S3): detected PII spans (offsets + class) once the deterministic detectors exist.
-    spans: [],
+    messages: msgs.map((m) => {
+      const text = expired || Number(m.deleted) === 1 || m.text === null ? null : str(m.text);
+      return {
+        conversation: str(m.conversation),
+        id: str(m.provider_msg_id),
+        thread: strOrNull(m.thread),
+        sentAt: iso(m.sent_at),
+        editedAt: iso(m.edited_at),
+        deleted: Number(m.deleted) === 1,
+        author: str(m.author_ref),
+        authorKind: str(m.author_kind),
+        text,
+        // owner view only (review_get / record_get): where the detectors found something, never what
+        spans: text === null ? [] : classifyText(text, cfg).spans.map((s) => ({ class: s.class, start: s.start, end: s.end })),
+      };
+    }),
   };
+}
+
+/** Classifier settings (obs_settings): `gov_id_countries` (JSON list, default SK, CZ, DE, US), `actionable_words` (JSON list). */
+export function loadClassifierConfig(db: Db): ClassifyConfig {
+  const list = (key: string): string[] | undefined => {
+    const v = getSetting(db, key);
+    if (v === null) return undefined;
+    try {
+      const a: unknown = JSON.parse(v);
+      return Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const gov = list("gov_id_countries");
+  const own = list("actionable_words");
+  return { ...(gov ? { govCountries: gov } : {}), ...(own ? { ownerWords: own } : {}) };
 }
 
 /** Records waiting for the owner (C86 canvas badge). */
@@ -597,17 +621,6 @@ export function isSecretRecord(r: Row): boolean {
   } catch {
     return true;
   }
-}
-
-/**
- * The router's FIRST step (S3 builds the rest): a secret record is dropped by rule 0 before any rule is looked at, so no rule
- * the owner writes (also a catch-all one) can ever deliver it. `matches` is S3's rule matcher; it is not called for a secret.
- */
-export type Route = { kind: "drop"; ruleId: string; reason: "secret" } | { kind: "rule"; ruleId: string } | { kind: "review" };
-export function routeRecord(record: Row, rules: readonly RuleView[], matches: (rule: RuleView, record: Row) => boolean): Route {
-  if (isSecretRecord(record)) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
-  const hit = rules.find((rule) => rule.id !== RULE_ZERO_ID && matches(rule, record));
-  return hit ? { kind: "rule", ruleId: hit.id } : { kind: "review" };
 }
 
 export type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";

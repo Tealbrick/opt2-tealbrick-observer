@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { decideRecord, PAGE_SIZE, RULE_ZERO_ID, routeRecord } from "../src/store.ts";
+import { decideRecord, PAGE_SIZE } from "../src/store.ts";
 import { AGENT_A, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
@@ -62,13 +62,19 @@ describe("review_list, review_get, records_list, record_get", () => {
     assert.deepEqual([...seen].sort(), [...made].sort());
     await rejects(run("review_list", { cursor: "garbage" }, O()), "cursor_invalid", 400);
   });
-  it("review_get shows the messages with their text and an empty span list (S3 fills the spans); only for a record in review", async () => {
+  it("review_get shows the messages with their text and the detected spans (classes and offsets only); only for a record in review", async () => {
     const rec = seedRecord(db, src, { state: "review", pii: { email: 1 } });
     seedMessage(db, src, { record: rec, id: "m2", sentAt: Date.UTC(2026, 9, 2, 11), text: "second" });
     seedMessage(db, src, { record: rec, id: "m1", sentAt: Date.UTC(2026, 9, 2, 10), text: "first mail me at a@b.example", author: "email:a@b.example" });
     const out = (await run("review_get", { id: rec }, O())).record;
     assert.deepEqual(out.messages.map((m: Out) => [m.id, m.text]), [["m1", "first mail me at a@b.example"], ["m2", "second"]]);
-    assert.deepEqual(out.spans, []);
+    const text = "first mail me at a@b.example";
+    const [first, second] = out.messages;
+    assert.deepEqual(first.spans, [{ class: "email", start: text.indexOf("a@b"), end: text.length }]);
+    assert.deepEqual(second.spans, []);
+    assert.equal(text.slice(first.spans[0].start, first.spans[0].end), "a@b.example");
+    assert.deepEqual(Object.keys(first.spans[0]).sort(), ["class", "end", "start"], "no matched value in the span");
+    assert.equal(out.spans, undefined, "spans live on the messages");
     assert.equal(out.state, "review");
     const done = seedRecord(db, src, { state: "delivered" });
     await rejects(run("review_get", { id: done }, O()), "not_found", 404);
@@ -407,27 +413,6 @@ describe("the guards live in decideRecord itself", () => {
     const rec = seedRecord(db, src, { state: "delivered", withText: true });
     const r = { ...(db.prepare("SELECT * FROM obs_records WHERE id = ?").get(rec) as Record<string, unknown>) };
     assert.throws(() => call(r, "drop"), { code: "record_not_waiting" });
-  });
-});
-
-describe("the router never lets a rule deliver a secret", () => {
-  const rules = (ids: string[]) => ids.map((id, position) => ({ id, position, locked: id === RULE_ZERO_ID, match: {}, action: { deliver: "knowledge" } }));
-  const catchAll = () => true;
-  it("a secret record is dropped by rule 0 before any rule is looked at (the matcher is not even called)", () => {
-    let calls = 0;
-    const matcher = (_r: unknown, _rec: unknown) => {
-      calls++;
-      return catchAll();
-    };
-    for (const rec of [{ secret: 1, pii_json: "{}" }, { secret: 0, pii_json: '{"secret":2}' }]) {
-      assert.deepEqual(routeRecord(rec, rules([RULE_ZERO_ID, "rul_a"]), matcher), { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" });
-    }
-    assert.equal(calls, 0);
-  });
-  it("quiet on good: a normal record goes to the first matching rule (never rule 0), else to Review", () => {
-    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a", "rul_b"]), (r) => r.id === "rul_b"), { kind: "rule", ruleId: "rul_b" });
-    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a"]), () => false), { kind: "review" });
-    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a"]), catchAll), { kind: "rule", ruleId: "rul_a" });
   });
 });
 
