@@ -22,7 +22,7 @@ export const SPECIAL_WORDS: Readonly<Record<Lang, Readonly<Record<SpecialCategor
     ethnicity: ["etnick*", "etnicit*", "rómsk*", "rasov*", "národnosť", "národnost*"],
   },
   de: {
-    health: ["diagnose*", "krebs", "chemotherapie", "diabetes", "diabetiker*", "hiv", "depression*", "angststörung*", "schwanger*", "fehlgeburt", "therapie*", "psychiater*", "medikament*", "behinderung*", "krankschreibung*", "krankheit*", "epilepsie", "asthma", "demenz", "alzheimer*", "burnout", "suchtkrank*"],
+    health: ["*erkrankung", "*krebs", "*krankheit", "diagnose*", "krebs", "chemotherapie", "diabetes", "diabetiker*", "hiv", "depression*", "angststörung*", "schwanger*", "fehlgeburt", "therapie*", "psychiater*", "medikament*", "behinderung*", "krankschreibung*", "krankheit*", "epilepsie", "asthma", "demenz", "alzheimer*", "burnout", "suchtkrank*"],
     religion: ["muslim*", "christlich*", "christentum", "jüdisch*", "judentum", "katholisch*", "evangelisch*", "protestantisch*", "atheist*", "buddhist*", "buddhismus", "hindu*", "sikh*", "religion*", "religiös*", "moschee*", "synagoge*", "islam*", "taufe", "glaubens*"],
     union: ["gewerkschaft*", "betriebsrat", "tarifverhandlung*"],
     sexuality: ["schwul*", "lesbisch*", "bisexuell*", "homosexuell*", "heterosexuell*", "transgender*", "queer", "sexuelle orientierung", "transsexuell*"],

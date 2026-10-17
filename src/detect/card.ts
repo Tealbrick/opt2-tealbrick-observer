@@ -1,8 +1,9 @@
-// Payment cards: 13–19 digits (spaces or dashes between), a Luhn checksum AND a known issuer range. Luhn alone passes one random
-// number in ten, so timestamps, order numbers and ids without a card prefix stay quiet.
+// Payment cards: 13–19 digits (single spaces or dashes between), a Luhn checksum AND a known issuer range. Luhn alone passes one
+// random number in ten, so timestamps, order numbers and ids without a card prefix stay quiet. EVERY 13–19 digit window of a
+// digit run is tested, so a card followed by an expiry ("4111 1111 1111 1111 12/26"), a CVV, or preceded by a prefix is found.
 import { type Detection, detection, type Span } from "./types.ts";
 
-const CANDIDATE = /(?<!\d)\d(?:[ -]?\d){12,18}(?!\d)/g;
+const RUN = /\d(?:[ -]?\d)*/g;
 
 export function luhn(digits: string): boolean {
   let sum = 0;
@@ -40,14 +41,29 @@ export function knownIssuer(d: string): boolean {
 export function detectCards(text: string): Detection {
   const spans: Span[] = [];
   if (!/\d{4}/.test(text)) return detection("card", spans);
-  for (const m of text.matchAll(CANDIDATE)) {
-    const start = m.index ?? 0;
-    const end = start + m[0].length;
-    const digits = m[0].replace(/\D/g, "");
-    if (digits.length < 13 || digits.length > 19) continue;
-    // a longer digit chain that merely starts like a card ("1234 5678 9012 3456 7890 1234") is not one
-    if ((text[end] === " " || text[end] === "-") && /\d/.test(text[end + 1] ?? "")) continue;
-    if (luhn(digits) && knownIssuer(digits)) spans.push({ start, end });
+  for (const m of text.matchAll(RUN)) {
+    const base = m.index ?? 0;
+    const pos: number[] = [];
+    let digits = "";
+    for (let i = 0; i < m[0].length; i++) {
+      const c = m[0][i] as string;
+      if (c >= "0" && c <= "9") {
+        pos.push(base + i);
+        digits += c;
+      }
+    }
+    if (digits.length < 13) continue;
+    for (let s = 0; s + 13 <= digits.length; s++) {
+      let hit = 0;
+      for (let len = Math.min(19, digits.length - s); len >= 13 && !hit; len--) {
+        const w = digits.slice(s, s + len);
+        if (luhn(w) && knownIssuer(w)) hit = len;
+      }
+      if (hit) {
+        spans.push({ start: pos[s] as number, end: (pos[s + hit - 1] as number) + 1 });
+        s += hit - 1;
+      }
+    }
   }
   return detection("card", spans);
 }

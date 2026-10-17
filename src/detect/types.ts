@@ -29,3 +29,15 @@ export function isAlnum(ch: string): boolean {
   const c = ch.charCodeAt(0);
   return c < 128 ? isAsciiAlnum(c) : LETTER_OR_DIGIT.test(ch);
 }
+
+/** Sort spans and join the overlapping ones (touching spans stay apart), so a count is a count of distinct regions. */
+export function mergeOverlaps(spans: readonly Span[]): Span[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start || b.end - a.end);
+  const out: Span[] = [];
+  for (const s of sorted) {
+    const last = out[out.length - 1];
+    if (last && s.start < last.end) last.end = Math.max(last.end, s.end);
+    else out.push({ start: s.start, end: s.end });
+  }
+  return out;
+}

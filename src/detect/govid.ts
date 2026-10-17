@@ -1,8 +1,9 @@
 // Government ids with checksums, per country, in ONE table (GOV_ID_COUNTRIES). The classifier takes the list of countries to
 // check (settings key `gov_id_countries`, default DEFAULT_GOV_COUNTRIES); a country that is not listed is not looked for.
-//   SK, CZ  rodné číslo: YYMMDD/SSSC, 10 digits divisible by 11 (the pre-1954 9-digit form only with the slash)
+//   SK, CZ  rodné číslo: YYMMDD/SSSC (slash, space or nothing), 10 digits divisible by 11 (the pre-1954 9-digit form only with the slash)
 //   DE      Steuerliche Identifikationsnummer: 11 digits, ISO 7064 mod 11,10, digit-frequency rule
-//   US      SSN: AAA-GG-SSSS with the area rules (no 000, 666, 900–999; group 00 and serial 0000 do not exist)
+//   US      SSN: AAA-GG-SSSS with the area rules (no 000, 666, 900–999; group 00 and serial 0000 do not exist); nine digits without
+//           separators only next to "SSN" / "social security"
 import { type Detection, detection, type Span } from "./types.ts";
 
 export type GovFinder = (text: string) => Span[];
@@ -11,7 +12,7 @@ const daysIn = (year: number, month: number): number => new Date(Date.UTC(year, 
 
 function findRodneCislo(text: string): Span[] {
   const out: Span[] = [];
-  for (const m of text.matchAll(/(?<![\d/])(\d{2})(\d{2})(\d{2})(\/?)(\d{3,4})(?!\d)/g)) {
+  for (const m of text.matchAll(/(?<![\d/])(\d{2})(\d{2})(\d{2})([/ ]?)(\d{3,4})(?!\d)/g)) {
     const [, yy, mm, dd, slash, tail] = m as unknown as [string, string, string, string, string, string];
     const y = Number(yy);
     let month = Number(mm);
@@ -56,12 +57,18 @@ function findSteuerId(text: string): Span[] {
   return out;
 }
 
+const ssnOk = (area: string, group: string, serial: string): boolean => {
+  const a = Number(area);
+  return !(a === 0 || a === 666 || a >= 900 || group === "00" || serial === "0000");
+};
 function findSsn(text: string): Span[] {
   const out: Span[] = [];
   for (const m of text.matchAll(/(?<![\d-])(\d{3})([- ])(\d{2})\2(\d{4})(?![\d-])/g)) {
-    const area = Number(m[1]);
-    if (area === 0 || area === 666 || area >= 900 || m[3] === "00" || m[4] === "0000") continue;
-    out.push({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length });
+    if (ssnOk(m[1] as string, m[3] as string, m[4] as string)) out.push({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length });
+  }
+  // nine digits in a row are an SSN only next to the words "SSN" / "social security": any other nine digits are a number
+  for (const m of text.matchAll(/(?:\bssn|social[ -]security(?:[ -](?:number|no\.?|#))?)[^\d\n]{0,12}?(?<![\d-])(\d{3})(\d{2})(\d{4})(?![\d-])/gi)) {
+    if (ssnOk(m[1] as string, m[2] as string, m[3] as string)) out.push({ start: (m.index ?? 0) + m[0].length - 9, end: (m.index ?? 0) + m[0].length });
   }
   return out;
 }

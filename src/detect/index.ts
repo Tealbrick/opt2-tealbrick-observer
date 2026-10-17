@@ -4,6 +4,7 @@ import { detectCards } from "./card.ts";
 import { detectEmails } from "./email.ts";
 import { DEFAULT_GOV_COUNTRIES, detectGovIds } from "./govid.ts";
 import { detectIbans } from "./iban.ts";
+import { mapBack, normalize } from "./normalize.ts";
 import { detectPhones } from "./phone.ts";
 import { detectSecrets } from "./secret.ts";
 import { detectSpecial } from "./special.ts";
@@ -14,16 +15,23 @@ export interface DetectConfig {
   govCountries?: readonly string[];
 }
 
+/**
+ * All detectors, on a NORMALISED copy of the text (NFKC, format characters dropped, see normalize.ts), with every span mapped
+ * back to the original offsets. Secrets are looked for on their own copy that also folds Cyrillic/Greek look-alikes.
+ */
 export function detectAll(text: string, cfg: DetectConfig = {}): Detection[] {
+  const base = normalize(text);
+  const t = base.text;
+  const back = (d: Detection): Detection => (base.identity ? d : { class: d.class, spans: mapBack(d.spans, base), count: d.count });
   const all = [
     detectSecrets(text),
-    detectEmails(text),
-    detectPhones(text),
-    detectIbans(text),
-    detectCards(text),
-    detectGovIds(text, cfg.govCountries ?? DEFAULT_GOV_COUNTRIES),
-    detectAddresses(text),
-    detectSpecial(text),
+    back(detectEmails(t)),
+    back(detectPhones(t)),
+    back(detectIbans(t)),
+    back(detectCards(t)),
+    back(detectGovIds(t, cfg.govCountries ?? DEFAULT_GOV_COUNTRIES)),
+    back(detectAddresses(t)),
+    back(detectSpecial(t)),
   ];
   return all.filter((d) => d.count > 0);
 }
