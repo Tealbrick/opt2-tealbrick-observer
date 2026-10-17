@@ -94,6 +94,7 @@ CREATE TABLE obs_deliveries (
   first_attempt_at INTEGER,
   last_error TEXT,
   warning TEXT,                             -- e.g. may_duplicate: set when a retry after 23 h made a new key
+  superseded INTEGER NOT NULL DEFAULT 0,    -- 1 when its record went back to Review after the decision (a held row stays held; S4 must not send it)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (record_id, revision, destination) -- one outbox row per record revision and destination, whatever its key

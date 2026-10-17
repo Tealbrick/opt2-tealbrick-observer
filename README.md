@@ -86,9 +86,14 @@ image name in `tealbrick-ci.json` (`opt2-tealbrick-observer`).
 ## What Observer does with secrets (an honest claim)
 Observer removes the secrets it recognises before it stores a message: private keys and certificates (PEM, PuTTY), JWTs, API keys and tokens of the common services, passwords / tokens / keys written as `name = value` (also in identifiers such as `DB_PASSWORD`, in SQL, command lines, JSON, YAML and markdown), credentials in URLs, cookies and authorization headers. It also holds any record that contains a token that merely LOOKS like a secret (a long random-looking string) for your review: such a record is never delivered automatically, and it is not purged automatically either, because it may be a false positive. **It is not a complete secret scanner.** A secret in a form nobody wrote a pattern for can get through, and a record is only held when its text looks suspicious.
 
-Known limits (no fix planned):
+## Known limits
+This is the end of widening the secret net for this version; S6 tunes the false positives.
 - A secret split across two different records, 30 minutes or more apart, is not found: the records are scanned one by one.
-- Keywords are recognised in English, Slovak, Czech and German; a key name in another language is found only by its value (a known key format, or a high-entropy token).
+- Keywords are recognised in English, Slovak, Czech and German; a key name in another language is found only by its value (a known key format, a high-entropy value after `=` / `:`, or the suspect check below).
 - Over-redaction is the safe side: after an explicit `:` or `=` the whole rest of the line is removed.
 - A record over 256 KiB (or with more than 2000 messages) is not scanned across messages; it is held for review as suspect instead.
+- The suspect check is deliberately sensitive and has false positives: long random-looking identifiers, hex strings of 32+ characters without a hash word next to them, base64 data, tokens written in code-like groups. A flagged record is only held for review, never lost. It does not look at tokens shorter than 16 characters, at secrets written in words, or inside images and attachments (Observer stores no attachments).
+- URLs are taken apart (userinfo, every path segment, query, fragment); a slug made of plain words is safe, a path segment or query value that looks like a key is not.
+- Thread subjects and author handles are checked with the secret and suspect detectors only (not for email addresses or phone numbers: an author handle is metadata).
+- A held delivery of a record that goes back to Review is marked `superseded`; S4 must call `deliverySendable` before every send. Until then nothing is sent at all.
 

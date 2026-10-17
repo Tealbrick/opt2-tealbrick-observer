@@ -15,9 +15,10 @@
 //  - KNOWN LIMIT: a secret split across two DIFFERENT records (two windows 30+ minutes apart) is not found.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
-import { classifyRecord } from "./classify.ts";
+import { classifyMeta, classifyRecord } from "./classify.ts";
 import { detectSecrets } from "./detect/secret.ts";
-import { loadClassifierConfig, parsePii, type Row, recordRow } from "./store.ts";
+import { detectSuspect } from "./detect/suspect.ts";
+import { loadClassifierConfig, parsePii, type Row, recordRow, supersedeHeld } from "./store.ts";
 import type { MessageWindow } from "./window.ts";
 
 const str = (v: unknown): string => String(v);
@@ -27,6 +28,15 @@ export function recordTexts(db: Db, recordId: string): (string | null)[] {
     .prepare("SELECT text FROM obs_messages WHERE record_id = ? AND deleted = 0 ORDER BY sent_at, provider_msg_id")
     .all(recordId)
     .map((r) => (r.text === null ? null : str(r.text)));
+}
+
+/** Thread subjects and author handles of a record, classified with the secret and suspect detectors. */
+export function recordMetaFacts(db: Db, recordId: string): { secret: number; suspect: number } {
+  const values: (string | null)[] = [];
+  for (const r of db.prepare("SELECT DISTINCT thread, author_ref FROM obs_messages WHERE record_id = ?").all(recordId)) values.push(r.thread === null ? null : str(r.thread), str(r.author_ref));
+  const thread = db.prepare("SELECT thread FROM obs_records WHERE id = ?").get(recordId)?.thread;
+  values.push(thread === null || thread === undefined ? null : str(thread));
+  return classifyMeta(values);
 }
 
 export function purgeRecordText(db: Db, recordId: string, now: number): void {
@@ -39,32 +49,59 @@ export function purgeRecordText(db: Db, recordId: string, now: number): void {
 export const JOINED_CAP = 256 * 1024;
 export const MAX_SCANNED_MESSAGES = 2000;
 const SEAM = 4096;
+/** Past this many messages the seams look at a shorter tail / head: a secret split over messages is short. */
+const MANY_MESSAGES = 200;
+const SEAM_MANY = 512;
 
-/** Scan the joined texts of a record for a secret that no single message holds: whole text with three separators, then each
- *  adjacent pair and triple around its seams. "toolarge": over the cap, not scanned (the caller marks the record suspect). */
-export function joinedSecretScan(texts: readonly (string | null)[]): "hit" | "toolarge" | "clean" {
+export interface JoinedScan {
+  /** a secret appears when the texts are joined or at a seam */
+  secret: boolean;
+  /** a token that looks like a secret appears when the texts are joined or at a seam (it may be new: or found in one message too) */
+  suspect: boolean;
+  /** over the cap: not scanned across messages */
+  toolarge: boolean;
+}
+
+/**
+ * Scan the joined texts of a record for what no single message holds: the whole text with three separators, then each adjacent pair
+ * and triple around its seams, with BOTH detectors (secrets and suspect tokens). Runs only when a record closes or changes.
+ */
+export function joinedScan(texts: readonly (string | null)[]): JoinedScan {
+  const out: JoinedScan = { secret: false, suspect: false, toolarge: false };
   const parts = texts.filter((t): t is string => t !== null && t.length > 0);
-  if (parts.length === 0) return "clean";
+  if (parts.length === 0) return out;
   const total = parts.reduce((n, t) => n + t.length, 0);
-  if (total > JOINED_CAP || parts.length > MAX_SCANNED_MESSAGES) return "toolarge";
+  if (total > JOINED_CAP || parts.length > MAX_SCANNED_MESSAGES) return { ...out, toolarge: true };
   const seps = ["\n", "", " "];
-  for (const sep of seps) if (parts.length > 1 && detectSecrets(parts.join(sep)).count > 0) return "hit";
+  const look = (t: string): boolean => {
+    if (detectSecrets(t).count > 0) out.secret = true;
+    else if (!out.suspect && detectSuspect(t).count > 0) out.suspect = true;
+    return out.secret;
+  };
+  if (parts.length > 1) for (const sep of seps) if (look(parts.join(sep))) return out;
+  const seam = parts.length > MANY_MESSAGES ? SEAM_MANY : SEAM;
   for (let i = 0; i + 1 < parts.length; i++) {
-    const a = (parts[i] as string).slice(-SEAM);
+    const a = (parts[i] as string).slice(-seam);
     const b = parts[i + 1] as string;
     const c = parts[i + 2];
     for (const sep of seps) {
-      if (detectSecrets(a + sep + b.slice(0, SEAM)).count > 0) return "hit";
-      if (c !== undefined && detectSecrets(a + sep + b.slice(0, 2 * SEAM) + sep + c.slice(0, SEAM)).count > 0) return "hit";
+      if (look(a + sep + b.slice(0, seam))) return out;
+      if (c !== undefined && look(a + sep + b.slice(0, 2 * seam) + sep + c.slice(0, seam))) return out;
     }
   }
-  return "clean";
+  return out;
 }
 
-/** Run the joined scan on a stored record; a hit purges every message text of the record. */
-export function scanRecord(db: Db, recordId: string, now: number): "hit" | "toolarge" | "clean" {
-  const result = joinedSecretScan(recordTexts(db, recordId));
-  if (result === "hit") purgeRecordText(db, recordId, now);
+/** The secret part of joinedScan as before: "hit" (a secret), "toolarge", or "clean". */
+export function joinedSecretScan(texts: readonly (string | null)[]): "hit" | "toolarge" | "clean" {
+  const r = joinedScan(texts);
+  return r.secret ? "hit" : r.toolarge ? "toolarge" : "clean";
+}
+
+/** Run the joined scan on a stored record; a secret purges every message text of the record. */
+export function scanRecord(db: Db, recordId: string, now: number): JoinedScan {
+  const result = joinedScan(recordTexts(db, recordId));
+  if (result.secret) purgeRecordText(db, recordId, now);
   return result;
 }
 
@@ -78,11 +115,17 @@ export function reclassifyRecord(db: Db, recordId: string, now: number): boolean
   const scan = scanRecord(db, recordId, now);
   if (state === "open" || state === "classified") return false; // routed (and dropped, for a secret) when the window closes
   const facts = classifyRecord(recordTexts(db, recordId), loadClassifierConfig(db));
-  if (scan === "hit") {
+  if (scan.secret) {
     facts.classes.secret = Math.max(facts.classes.secret ?? 0, 1);
     facts.secret = true;
   }
-  if (scan === "toolarge") facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
+  if (scan.toolarge || scan.suspect) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
+  const meta = recordMetaFacts(db, recordId);
+  if (meta.secret > 0) {
+    facts.classes.secret = Math.max(facts.classes.secret ?? 0, meta.secret);
+    facts.secret = true;
+  }
+  if (meta.suspect > 0) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, meta.suspect);
   const before = parsePii(rec.pii_json);
   const hadSecret = Number(rec.secret) === 1 || (before.secret ?? 0) > 0;
   const grew = (facts.secret && !hadSecret) || Object.entries(facts.classes).some(([c, n]) => c !== "secret" && n > (before[c] ?? 0));
@@ -94,6 +137,8 @@ export function reclassifyRecord(db: Db, recordId: string, now: number): boolean
   }
   if (state === "delivered" && !grew) return false;
   db.transaction(() => {
+    // a held row is not deleted (its hold is in Holds): it is marked superseded and S4 never sends it
+    supersedeHeld(db, recordId);
     db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status IN ('pending', 'failed')").run(recordId);
     db.prepare(
       `UPDATE obs_records SET state = 'review', revision = revision + 1, pii_json = ?, secret = ?, actionable = ?, decided_by = NULL, decided_at = NULL,

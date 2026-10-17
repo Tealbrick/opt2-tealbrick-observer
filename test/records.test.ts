@@ -8,7 +8,7 @@ import { classifyText, SECRET_MARKER } from "../src/classify.ts";
 import { sanitizeForStorage, sanitizeShort, storeMessage } from "../src/ingest.ts";
 import { applyRouting } from "../src/pipeline.ts";
 import { attachWindow, reclassifyRecord } from "../src/records.ts";
-import { RULE_ZERO_ID } from "../src/store.ts";
+import { deliverySendable, RULE_ZERO_ID } from "../src/store.ts";
 import { liveWindows } from "../src/window.ts";
 import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { ingestRecord, seedMessage, seedRecord, seedSource } from "./seed.ts";
@@ -340,3 +340,84 @@ describe("suspect_secret: held for Review whatever the rules say", () => {
     assert.equal(JSON.parse(String(rec(id).pii_json)).suspect_secret, 1);
   });
 });
+
+describe("thread subjects and author handles are classified with the record", () => {
+  const T = j("k8Jd92LmQx", "7PzVb3TnYc", "8WsDuR4");
+  it("a possible secret in the thread subject holds the record, like one in the body", async () => {
+    await put({}, { deliver: "knowledge" });
+    const id = seedRecord(db, src, { state: "open", thread: `about ${T}` });
+    seedMessage(db, src, { record: id, text: "plain words about lunch", thread: `about ${T}` });
+    assert.deepEqual(applyRouting(db, id, NOW).route, { kind: "review", ruleId: null, reason: "suspect_secret" });
+    const clean = seedRecord(db, src, { state: "open", thread: "Re: lunch" });
+    seedMessage(db, src, { record: clean, text: "plain words about lunch", thread: "Re: lunch" });
+    assert.equal(applyRouting(db, clean, NOW).route.kind, "deliver", "quiet on good");
+  });
+  it("a secret in an author handle (written past ingest) drops the record by rule 0", async () => {
+    await put({}, { deliver: "knowledge" });
+    const id = seedRecord(db, src, { state: "open" });
+    seedMessage(db, src, { record: id, text: "plain words about lunch", author: `slack:${j("ghp", "_", "aB3dE6".repeat(6))}` });
+    assert.deepEqual(applyRouting(db, id, NOW).route, { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" });
+  });
+  it("a token split over two messages makes the record suspect when it closes (neither message alone is)", async () => {
+    await put({}, { deliver: "knowledge" });
+    const id = ingestRecord(db, src, [`the code is ${T.slice(0, 12)}`, `${T.slice(12)} and thanks`], NOW);
+    assert.deepEqual(applyRouting(db, id, NOW).route, { kind: "review", ruleId: null, reason: "suspect_secret" });
+    assert.ok(msgs(id).every((m) => m.text !== null), "suspect records are not purged");
+  });
+});
+
+describe("a held delivery of a record that goes back to Review can never be sent", () => {
+  const T = "mail me at anna@example.com";
+  async function heldRecord(): Promise<{ id: string; dlv: string; message: string }> {
+    await put({}, { deliver: "knowledge" });
+    const id = ingestRecord(db, src, ["just words about lunch"], NOW);
+    applyRouting(db, id, NOW);
+    const dlv = String(db.prepare("SELECT id FROM obs_deliveries WHERE record_id = ?").get(id)?.id);
+    db.prepare("UPDATE obs_deliveries SET status = 'held', hold_id = 'hld_1' WHERE id = ?").run(dlv);
+    return { id, dlv, message: String(db.prepare("SELECT provider_msg_id AS id FROM obs_messages WHERE record_id = ?").get(id)?.id) };
+  }
+  it("while the record is approved and nothing changed the row is sendable (S4 asks before every send)", async () => {
+    const { dlv } = await heldRecord();
+    assert.equal(deliverySendable(db, dlv), true);
+    assert.equal(deliverySendable(db, "dlv_01J00000000000000000000000"), false, "unknown id");
+  });
+  it("an edit that sends the record back marks the held row superseded: not sendable, also if the hold is approved afterwards", async () => {
+    const { id, dlv, message } = await heldRecord();
+    const r = storeMessage(db, src, { conversation: "inbox", providerMsgId: message, thread: "t1", sentAt: NOW - 5000, editedAt: NOW - 1000, author: "email:anna@example.com", authorKind: "person", text: T }, NOW);
+    assert.equal(r.reopened, true);
+    assert.equal(rec(id).state, "review");
+    const row = db.prepare("SELECT status, superseded FROM obs_deliveries WHERE id = ?").get(dlv);
+    assert.deepEqual({ ...row }, { status: "held", superseded: 1 }, "the hold is still in Holds, but the row is dead");
+    assert.equal(deliverySendable(db, dlv), false);
+    db.prepare("UPDATE obs_deliveries SET status = 'pending' WHERE id = ?").run(dlv); // the hold is approved in Holds
+    assert.equal(deliverySendable(db, dlv), false, "approving the hold does not revive it");
+    assert.equal((await handlers.deliveries_list.run({} as never, O())) && ((await handlers.deliveries_list.run({} as never, O())) as { items: { id: string; superseded: boolean }[] }).items.find((d) => d.id === dlv)?.superseded, true);
+  });
+  it("a record in Review never has a sendable row, however the row looks; a secret record, another revision or another destination neither", async () => {
+    const { id, dlv } = await heldRecord();
+    db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(id);
+    assert.equal(deliverySendable(db, dlv), false, "record in review");
+    db.prepare("UPDATE obs_records SET state = 'approved' WHERE id = ?").run(id);
+    assert.equal(deliverySendable(db, dlv), true, "control: approved again");
+    db.prepare("UPDATE obs_records SET revision = 2 WHERE id = ?").run(id);
+    assert.equal(deliverySendable(db, dlv), false, "other revision");
+    db.prepare("UPDATE obs_records SET revision = 1, decided_destination = 'kanban' WHERE id = ?").run(id);
+    assert.equal(deliverySendable(db, dlv), false, "other destination");
+    db.prepare("UPDATE obs_records SET decided_destination = 'knowledge', secret = 1 WHERE id = ?").run(id);
+    assert.equal(deliverySendable(db, dlv), false, "secret record");
+    db.prepare("UPDATE obs_records SET secret = 0 WHERE id = ?").run(id);
+    db.prepare("UPDATE obs_deliveries SET status = 'sent' WHERE id = ?").run(dlv);
+    assert.equal(deliverySendable(db, dlv), false, "already sent");
+  });
+  it("the owner cannot re-decide while the held row is still in Holds (delivery_held); once it is cleared a new decision makes a fresh sendable row", async () => {
+    const { id, dlv, message } = await heldRecord();
+    storeMessage(db, src, { conversation: "inbox", providerMsgId: message, thread: "t1", sentAt: NOW - 5000, editedAt: NOW - 1000, author: "email:anna@example.com", authorKind: "person", text: T }, NOW);
+    await assert.rejects(handlers.review_decide.run({ recordId: id, decision: "deliver_redacted", destination: "knowledge" } as never, O()), { code: "delivery_held" });
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', hold_id = NULL WHERE id = ?").run(dlv); // the hold was denied
+    await handlers.review_decide.run({ recordId: id, decision: "deliver_redacted", destination: "knowledge" } as never, O());
+    const row = db.prepare("SELECT id, status, superseded FROM obs_deliveries WHERE record_id = ?").get(id);
+    assert.deepEqual([row?.status, row?.superseded], ["pending", 0]);
+    assert.equal(deliverySendable(db, String(row?.id)), true);
+  });
+});
+

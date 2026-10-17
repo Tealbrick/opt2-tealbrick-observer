@@ -141,7 +141,7 @@ describe("time budget", () => {
     "12 Foo Bar ", "((", "1/2/3/", "password: ", "key=value&", "=", ":a", "k=v\n", "0 0 0 0 ", "9 4111 1111 1111 1111 ", "Hlavná 1 Hlavná 1 ", "A A A A ", "Aaaaaaaaaaaaaaaaaaaaaaaaaaaa1 ",
     "Ünïcödé wörds äöü ", "ЖЖЖЖ ", "ab\u200bcd", "４１１１ ", "\n\n\n", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n", "00 421 00 421 ", "ul. Hlavná ul. Hlavná ", "1-1-1-1-1-", "…", "+4", "SSN 1", "XX99 ",
     "password", "password**|**", "PASSWORD  :  ", "api_key_api_key_", "key", "key=", "-p ", "--token ", "mysql -p ", "Cookie: a=b; ", "://", "a:b@", "-----BEGIN A-----\nabcd\n", "LS0tLS1CRUdJTi",
-    "<b>password</b> ", "&nbsp;", "Password for ", "(((((password:", "[\\w.-]", "ab ".repeat(30), "  \n  \n", "> AAAA\n", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n", "\\n", "dop_v1_", "key-", "8Q~", "1//",
+    "<b>password</b> ", "&nbsp;", "Password for ", "(((((password:", "[\\w.-]", "ab ".repeat(30), "  \n  \n", "> AAAA\n", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n", "\\n", "dop_v1_", "key-", "8Q~", "1//", "mysql -x ", "sshpass ", "7z a ", "https://a:b@", "https://", "a/b/c/", "0x", "JBSWY3DP", "ab12.cd34.", "k8Jd 92Lm ", "a1b2c3d4e5f6a7b8 ",
   ];
   const DETECTORS: [string, (t: string) => unknown][] = [
     ["secrets", detectSecrets], ["email", detectEmails], ["phone", detectPhones], ["iban", detectIbans], ["card", detectCards], ["govid", detectGovIds], ["address", detectAddresses], ["special", detectSpecial], ["suspect", detectSuspect],

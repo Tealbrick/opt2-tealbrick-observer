@@ -3,7 +3,7 @@
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { classifyRecord } from "./classify.ts";
-import { scanRecord } from "./records.ts";
+import { recordMetaFacts, scanRecord } from "./records.ts";
 import { type Route, type RouteFacts, routeFacts } from "./router.ts";
 import { DAY_MS, decideRecord, getPrivacy, listRules, loadClassifierConfig, notFound, type Row, recordRow } from "./store.ts";
 
@@ -17,7 +17,7 @@ export function applyRouting(db: Db, recordId: string, now: number): { route: Ro
     // with several separators and at every seam. A hit means a secret is stored in pieces: every message text of the record goes,
     // ids / digests / the flag stay. Too big to scan (256 KiB): held for Review as suspect.
     const scan = scanRecord(db, recordId, now);
-    const crossHit = scan === "hit";
+    const crossHit = scan.secret;
     const msgs = db.prepare("SELECT conversation, author_key, text FROM obs_messages WHERE record_id = ? AND deleted = 0 ORDER BY sent_at, provider_msg_id").all(recordId);
     const cfg = loadClassifierConfig(db);
     const texts = msgs.map((m) => (m.text === null ? null : String(m.text)));
@@ -27,7 +27,14 @@ export function applyRouting(db: Db, recordId: string, now: number): { route: Ro
       facts.classes.secret = Math.max(facts.classes.secret ?? 0, 1);
       facts.secret = true;
     }
-    if (scan === "toolarge") facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
+    if (scan.toolarge || scan.suspect) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
+    // the thread subject and the author handles are text as well: a hit there counts like one in the body
+    const meta = recordMetaFacts(db, recordId);
+    if (meta.secret > 0) {
+      facts.classes.secret = Math.max(facts.classes.secret ?? 0, meta.secret);
+      facts.secret = true;
+    }
+    if (meta.suspect > 0) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, meta.suspect);
     const hasText = !crossHit && texts.some((t) => t !== null);
     const secret = facts.secret || crossHit || Number(rec.secret) === 1;
     const rf: RouteFacts = {

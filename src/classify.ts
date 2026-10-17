@@ -4,6 +4,8 @@
 import { isActionable } from "./actionable.ts";
 import { type DetectConfig, detectAll, mergeSpans } from "./detect/index.ts";
 import { LABELS } from "./detect/redact.ts";
+import { detectSecrets } from "./detect/secret.ts";
+import { detectSuspect } from "./detect/suspect.ts";
 import type { DetectClass, Detection, Span } from "./detect/types.ts";
 
 export const SECRET_MARKER = LABELS.secret;
@@ -68,3 +70,19 @@ export function classifyRecord(texts: readonly (string | null)[], cfg: ClassifyC
   }
   return { classes, secret: (classes.secret ?? 0) > 0, actionable: isActionable(joined.join("\n"), cfg.ownerWords ?? []), words };
 }
+
+/**
+ * Thread subjects and author handles are text too (they are stored, shown and delivered): look at them with both fail-safe detectors
+ * (secrets, suspect tokens). A hit there counts like one in the body.
+ */
+export function classifyMeta(values: readonly (string | null)[]): { secret: number; suspect: number } {
+  let secret = 0;
+  let suspect = 0;
+  for (const v of new Set(values)) {
+    if (v === null || v === "") continue;
+    secret += detectSecrets(v).count + (v.includes(SECRET_MARKER) ? 1 : 0);
+    suspect += detectSuspect(v).count;
+  }
+  return { secret, suspect };
+}
+

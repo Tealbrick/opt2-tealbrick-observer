@@ -609,6 +609,8 @@ export interface DeliveryView {
   updatedAt: string | null;
   /** e.g. "may_duplicate: …", kept on the row (set by a retry after 23 h) */
   warning: string | null;
+  /** the record went back to Review after this row was written: it must not be sent */
+  superseded: boolean;
 }
 /** The stored input (`input_json`) is NOT part of the view: from S4 it holds the text that is sent. */
 export function deliveryView(r: Row): DeliveryView {
@@ -626,6 +628,7 @@ export function deliveryView(r: Row): DeliveryView {
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
     warning: strOrNull(r.warning),
+    superseded: Number(r.superseded) === 1,
   };
 }
 export function deliveryRow(db: Db, id: string): Row | undefined {
@@ -720,13 +723,32 @@ export function decideRecord(
         const attempted = existing.first_attempt_at !== null && existing.first_attempt_at !== undefined;
         db.prepare(
           `UPDATE obs_deliveries SET input_json = ?, status = 'pending', attempts = 0, hold_id = NULL, next_at = NULL, first_attempt_at = NULL,
-             last_error = NULL, warning = ?, idem_key = ?, updated_at = ? WHERE id = ?`,
+             last_error = NULL, warning = ?, superseded = 0, idem_key = ?, updated_at = ? WHERE id = ?`,
         ).run(input, attempted ? MAY_DUPLICATE_AFTER_REDECIDE : null, attempted ? deliveryKey(id, revision, dest, now) : str(existing.idem_key), now, str(existing.id));
       }
       db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, decided_destination = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, dest, purgeAt, now, id);
     }
     db.prepare("UPDATE obs_flags SET closed_at = ? WHERE record_id = ? AND closed_at IS NULL").run(now, id);
   });
+}
+
+/** A held (or any unsent) delivery row of a record that goes back to Review is marked superseded: it may still be approved in Holds, but it must never be sent. */
+export function supersedeHeld(db: Db, recordId: string): void {
+  db.prepare("UPDATE obs_deliveries SET superseded = 1 WHERE record_id = ? AND status IN ('held', 'pending')").run(recordId);
+}
+
+/**
+ * The one question S4 asks before it sends a row (also right after a hold is approved): is this delivery still what the owner decided?
+ * Only a row of the owner's LAST decision (record approved, same revision, same destination), not superseded, of a record that is not a
+ * secret record. A record in Review can never send anything.
+ * TODO(S4): call this immediately before the companion call and after every hold approval.
+ */
+export function deliverySendable(db: Db, deliveryId: string): boolean {
+  const d = deliveryRow(db, deliveryId);
+  if (!d || Number(d.superseded) === 1 || !["pending", "held"].includes(str(d.status))) return false;
+  const rec = recordRow(db, str(d.record_id));
+  if (!rec || isSecretRecord(rec)) return false;
+  return str(rec.state) === "approved" && Number(rec.revision) === Number(d.revision) && strOrNull(rec.decided_destination) === str(d.destination);
 }
 
 /** Does this record have a delivery Observer sent? (a `keep` makes sense only then) */
@@ -798,6 +820,7 @@ export function addFlag(db: Db, recordId: string, by: { type: string; id: string
   db.transaction(() => {
     db.prepare("INSERT INTO obs_flags (id, record_id, by_type, by_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, recordId, by.type, by.id, reason, now);
     db.prepare("UPDATE obs_records SET state = 'review', revision = revision + 1, decided_by = NULL, decided_at = NULL, decided_destination = NULL, updated_at = ? WHERE id = ?").run(now, recordId);
+    supersedeHeld(db, recordId);
   });
   return id;
 }
