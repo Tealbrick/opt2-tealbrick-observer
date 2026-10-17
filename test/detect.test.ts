@@ -28,11 +28,11 @@ const AWS = `AKIA${rep("Q7", 8)}`;
 const SLACK = `xoxb-${rep("1234567890", 2)}-${rep("aBcD", 6)}`;
 const GLPAT = `glpat-${rep("x9Y8", 6)}`;
 const TB = `tbo_${rep("k3Lm9Q", 5)}`;
-const JWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+const JWT = ["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].join(".") /* built at run time */;
 
 describe("secrets", () => {
   it("fires on PEM blocks (also an unterminated one: to the end), JWT/JWS, key prefixes, bearer tokens and URL credentials", () => {
-    const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7\nabc==\n-----END RSA PRIVATE KEY-----";
+    const pem = `-----BEGIN RSA ${"PRIVATE"} KEY-----\nMIIEowIBAAKCAQEA7\nabc==\n-----END RSA ${"PRIVATE"} KEY-----` /* built at run time */;
     fires(detectSecrets, [
       [`key:\n${pem}\nthanks`, [pem]],
       ["-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk", ["-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk"]],

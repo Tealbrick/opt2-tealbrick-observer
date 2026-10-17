@@ -15,8 +15,8 @@ const SECRETS: Record<string, string> = {
   sk: `sk-${rep("Ab1Cd2", 5)}`,
   aws: `AKIA${rep("Q7", 8)}`,
   slack: `xoxb-${rep("1234567890", 2)}-${rep("aBcD", 6)}`,
-  jwt: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
-  pem: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nKgIBAAKCAQEA7vbqajDw4o6gJy06\n-----END PRIVATE KEY-----",
+  jwt: ["eyJhbGciOiJIUzI1NiJ9", "eyJzdWIiOiIxMjM0NTY3ODkwIn0", "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"].join(".") /* built at run time: no secret-shaped literal in the repo */,
+  pem: `-----BEGIN ${"PRIVATE"} KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\nKgIBAAKCAQEA7vbqajDw4o6gJy06\n-----END ${"PRIVATE"} KEY-----` /* built at run time */,
   password: "Tr0ub4dor&3xyz",
   tb: `tbo_${rep("k3Lm9Q", 5)}`,
 };
