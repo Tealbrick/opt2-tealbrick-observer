@@ -48,7 +48,7 @@ import {
   type StatusOutput,
 } from "#kit";
 import { now, setClock } from "./clock.ts";
-import { connectPort, requireConnect } from "./connect.ts";
+import { companionTargets, connectPort, requireConnect } from "./connect.ts";
 import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
 import { manifest, migrationsDir } from "./manifest.ts";
@@ -135,6 +135,13 @@ function needSource(db: Db, id: string): Record<string, unknown> {
 
 const MAX_SOURCES = 100;
 
+/** The apps the slice lets Observer call right now (for the owner UI: a destination that is not here is greyed). Product ids only. */
+const KNOWN_TARGETS = ["connect", "knowledge", "kanban", "inbox"] as const;
+function targetsOf(ctx: OpContext): string[] {
+  const t = companionTargets(ctx);
+  return KNOWN_TARGETS.filter((p) => t.includes(p));
+}
+
 export const handlers = {
   // ───────────────────────────────────────────── agent ops
   [OP.status]: op<StatusInput, StatusOutput>({
@@ -183,8 +190,9 @@ export const handlers = {
   [OP.sourcesAvailable]: op<SourcesAvailableInput, unknown>({
     async run(_i, ctx) {
       const port = connectPort(ctx);
-      if (!port) return { accounts: [], connectMissing: true };
-      return { accounts: await port.accounts(), connectMissing: false };
+      const targets = targetsOf(ctx);
+      if (!port) return { accounts: [], connectMissing: true, targets };
+      return { accounts: await port.accounts(), connectMissing: false, targets };
     },
   }),
   [OP.sourcesList]: op<SourcesListInput, unknown>({
@@ -332,7 +340,7 @@ export const handlers = {
   // ───────────────────────────────────────────── person ops: rules
   [OP.rulesList]: op<RulesListInput, unknown>({
     async run(_i, ctx) {
-      return { rules: listRules(ctx.db) };
+      return { rules: listRules(ctx.db), targets: targetsOf(ctx) };
     },
   }),
   [OP.rulePut]: op<RulePutInput, unknown>({

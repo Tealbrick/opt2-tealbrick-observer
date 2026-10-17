@@ -374,7 +374,8 @@
         "additionalProperties": false,
         "required": [
           "accounts",
-          "connectMissing"
+          "connectMissing",
+          "targets"
         ],
         "properties": {
           "accounts": {
@@ -386,6 +387,20 @@
           },
           "connectMissing": {
             "type": "boolean"
+          },
+          "targets": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "enum": [
+                "connect",
+                "knowledge",
+                "kanban",
+                "inbox"
+              ]
+            },
+            "description": "Apps Observer can call now (the slice lets the app reach them). The owner UI greys a destination that is not in the list."
           }
         }
       },
@@ -1799,7 +1814,8 @@
         "type": "object",
         "additionalProperties": false,
         "required": [
-          "rules"
+          "rules",
+          "targets"
         ],
         "properties": {
           "rules": {
@@ -1808,6 +1824,20 @@
             "items": {
               "type": "object"
             }
+          },
+          "targets": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "enum": [
+                "connect",
+                "knowledge",
+                "kanban",
+                "inbox"
+              ]
+            },
+            "description": "Apps Observer can call now (the slice lets the app reach them). The owner UI greys a destination that is not in the list."
           }
         }
       },
