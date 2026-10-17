@@ -22,6 +22,7 @@ function DeleteNow({ open, sources, onClose }: { open: boolean; sources: { id: s
     setDone(null);
     setError(null);
   }, [open, setError]);
+  const beforeOk = before === "" || (/^\d{4}-\d{2}-\d{2}$/.test(before) && !Number.isNaN(Date.parse(`${before}T00:00:00Z`)));
   const go = () =>
     act(async () => {
       const out = await run("purge", { ...(source ? { source } : {}), ...(before ? { before: `${before}T00:00:00Z` } : {}) });
@@ -39,7 +40,7 @@ function DeleteNow({ open, sources, onClose }: { open: boolean; sources: { id: s
             <Button onClick={onClose} disabled={busy}>
               Keep it
             </Button>
-            <Button variant="danger" confirm onClick={() => void go()} disabled={busy}>
+            <Button variant="danger" confirm onClick={() => void go()} disabled={busy || !beforeOk}>
               Delete the text
             </Button>
           </>
@@ -61,8 +62,8 @@ function DeleteNow({ open, sources, onClose }: { open: boolean; sources: { id: s
           <Field label="Which source">
             <Select value={source} onValueChange={setSource} options={[{ value: "", label: "All sources" }, ...sources.map((s) => ({ value: s.id, label: s.label }))]} />
           </Field>
-          <Field label="Only messages sent before" hint="Empty: all stored text of the source.">
-            <TextInput type="date" value={before} onChange={(e) => setBefore(e.target.value)} />
+          <Field label="Only messages sent before" hint="Write the day as YYYY-MM-DD. Empty: all stored text of the source." error={beforeOk ? undefined : "Write a date as YYYY-MM-DD, or leave it empty."}>
+            <TextInput name="before" inputMode="numeric" placeholder="YYYY-MM-DD" autoComplete="off" value={before} onChange={(e) => setBefore(e.target.value.trim())} />
           </Field>
         </div>
       )}

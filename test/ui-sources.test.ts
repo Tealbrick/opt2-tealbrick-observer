@@ -173,7 +173,7 @@ describe("Sources", () => {
     const m = await mount(h(await page(), {}));
     await click(control(m.host, "Read history…"));
     const dialog = openDialog(m.host);
-    const date = dialog.querySelector('input[type="date"]') as HTMLInputElement;
+    const date = dialog.querySelector('input[name="since"]') as HTMLInputElement;
     await type(date, new Date(Date.now() - 30 * 86_400_000).toISOString().slice(0, 10));
     await click(control(dialog, "Estimate"));
     await flush();
@@ -275,7 +275,7 @@ describe("Add source", () => {
     await next(dialog);
     await next(dialog, "Add source");
     assert.match(step(dialog, 3).textContent ?? "", /No history: this source gives Observer only messages sent from now on\./);
-    assert.equal(step(dialog, 3).querySelector('input[type="date"]'), null);
+    assert.equal(step(dialog, 3).querySelector('input[name="since"]'), null);
     await next(dialog, "Done");
     assert.equal(callsOf("backfill_start").length, 0);
     await m.unmount();

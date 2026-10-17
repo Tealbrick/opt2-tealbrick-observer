@@ -78,13 +78,27 @@ describe("Privacy", () => {
     assert.match(dialog.textContent ?? "", /It cannot be undone\. Documents already delivered to Knowledge stay there\./);
     assert.equal(callsOf("purge").length, 0);
     await choose(dialog, dialog.querySelector('[role="combobox"]') as Element, "Clinic partners");
-    await type(dialog.querySelector('input[type="date"]') as Element, "2026-01-01");
+    await type(dialog.querySelector('input[name="before"]') as Element, "2026-01-01");
     await click(control(dialog, "Delete the text"));
     await flush();
     const c = lastCall("purge");
     assert.deepEqual(c.input, { source: "src_tg", before: "2026-01-01T00:00:00Z" });
     assertWriteHeaders(c);
     assert.match(dialog.textContent ?? "", /Observer deleted the stored text of 7 messages\./);
+    await m.unmount();
+  });
+
+  it("a date that is not YYYY-MM-DD stops the delete and says so", async () => {
+    reset();
+    const m = await mount(h(await page(), {}));
+    await click(control(m.host, "Delete stored text…"));
+    const dialog = openDialog(m.host);
+    await type(dialog.querySelector('input[name="before"]') as Element, "01/01/2026");
+    assert.ok(control(dialog, "Delete the text").disabled);
+    assert.match(dialog.textContent ?? "", /Write a date as YYYY-MM-DD, or leave it empty\./);
+    await type(dialog.querySelector('input[name="before"]') as Element, "2026-13-45");
+    assert.ok(control(dialog, "Delete the text").disabled, "a day that does not exist");
+    assert.equal(callsOf("purge").length, 0);
     await m.unmount();
   });
 

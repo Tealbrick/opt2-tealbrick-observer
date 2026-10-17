@@ -38,8 +38,10 @@
 .item p .tb-icon, .item p img { vertical-align: middle; }
 .ob-filter { display: grid; gap: var(--tb-s2); width: 220px; }
 .ob-status { gap: var(--tb-s2); justify-content: flex-end; }
-.ob-warn { display: block; color: var(--tb-ink-soft); font-weight: var(--tb-weight-nav); }
-.ob-dest-cell { display: inline-flex; align-items: center; gap: var(--tb-s2); }
+/* every cell holds 28 or 36 px of content on even line heights: the middle-aligned cells then sit on whole pixels */
+.ob-table td { line-height: 28px; }
+.ob-warn { display: block; line-height: 20px; color: var(--tb-ink-soft); font-weight: var(--tb-weight-nav); }
+.ob-dest-cell { display: flex; align-items: center; gap: var(--tb-s2); }
 .ob-apps { display: grid; gap: var(--tb-s3); margin: 0; padding: 0; list-style: none; }
 .ob-apps li { display: grid; gap: var(--tb-s1); }
 

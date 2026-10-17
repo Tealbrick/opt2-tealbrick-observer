@@ -59,8 +59,8 @@ export function useHistory(sourceId: string | null) {
 export function HistoryFields({ h }: { h: ReturnType<typeof useHistory> }) {
   return (
     <div className="tb-stack">
-      <Field label="Read messages since" hint="History reaches back three years at most. Observer reads it in the background. You can pause or stop it." error={h.valid ? undefined : "Pick a date within the last three years."}>
-        <TextInput type="date" value={h.since} min={OLDEST()} max={TODAY()} onChange={(e) => h.setSince(e.target.value)} />
+      <Field label="Read messages since" hint="Write the day as YYYY-MM-DD. History reaches back three years at most. Observer reads it in the background. You can pause or stop it." error={h.valid ? undefined : "Write a date as YYYY-MM-DD, within the last three years."}>
+        <TextInput name="since" inputMode="numeric" placeholder="YYYY-MM-DD" autoComplete="off" value={h.since} onChange={(e) => h.setSince(e.target.value.trim())} />
       </Field>
       <div className="tb-ctas">
         <Button size="sm" onClick={() => void h.runEstimate()} disabled={h.busy || !h.valid}>

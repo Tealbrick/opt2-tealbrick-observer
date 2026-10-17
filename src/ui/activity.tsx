@@ -82,7 +82,7 @@ export function ActivityPage() {
         <EmptyState title={filter === "all" ? "Nothing delivered yet" : "No deliveries match"}>{filter === "all" ? "Records you approve in Review, and records a rule delivers, appear here." : "Pick another filter to see the rest."}</EmptyState>
       ) : (
         <>
-          <Table aria-label="Deliveries">
+          <Table className="ob-table" aria-label="Deliveries">
             <thead>
               <tr>
                 <th>When</th>
