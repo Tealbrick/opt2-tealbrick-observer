@@ -135,6 +135,19 @@ function needSource(db: Db, id: string): Record<string, unknown> {
 
 const MAX_SOURCES = 100;
 
+/**
+ * Who a record, a pause or a decision is attributed to (SDK-CALLER-PRODUCT, SDK 0.1.27). An app caller is keyed on its VERIFIED
+ * product (`ctx.caller.product`, set from the Portal-signed slice), never on `ctx.caller.name` or the manifest name: two apps can
+ * share a name, a product is unique. An app whose slice entry carries no product is keyed on its verified instance id (the
+ * `tb:ins:<id>` of its grant), which is also never a name, and the key says so (`ins:` instead of `app:`). Agents and persons keep
+ * their id. Observer serves no op to apps today, so this is the single place a future one gets its identity.
+ */
+export function callerKey(ctx: OpContext): string {
+  if (ctx.caller.type !== "app") return ctx.caller.id;
+  const product = (ctx.caller as { product?: unknown }).product;
+  return typeof product === "string" && product !== "" ? `app:${product}` : `ins:${ctx.caller.id}`;
+}
+
 /** The apps the slice lets Observer call right now (for the owner UI: a destination that is not here is greyed). Product ids only. */
 const KNOWN_TARGETS = ["connect", "knowledge", "kanban", "inbox"] as const;
 function targetsOf(ctx: OpContext): string[] {
@@ -157,7 +170,7 @@ export const handlers = {
       // ONE answer for an unknown id and for a job that cannot be paused (done, failed, cancelled): no 404/409 oracle
       const r = jobRow(ctx.db, i.jobId);
       if (!r || !["queued", "running", "waiting", "paused"].includes(String(r.state))) throw notFound("job");
-      const { row, changed } = transitionJob(ctx.db, r, "pause", ctx.caller.id, now());
+      const { row, changed } = transitionJob(ctx.db, r, "pause", callerKey(ctx), now());
       if (changed) ctx.statusChanged();
       return { job: { id: String(row.id), state: String(row.state) } };
     },
@@ -170,17 +183,17 @@ export const handlers = {
       const t = now();
       const target = deliveredRecord(ctx.db, i);
       // flagging the same record again is idempotent: the agent gets its open flag back, no new row, no cap use
-      const open = target ? openFlag(ctx.db, ctx.caller.id, target.id) : null;
+      const open = target ? openFlag(ctx.db, callerKey(ctx), target.id) : null;
       if (open) return { flagId: open };
       // the cap comes before the lookup answer, so a capped agent learns nothing about which ids exist
-      if (flagsToday(ctx.db, ctx.caller.id, t) >= FLAGS_PER_AGENT_PER_DAY) {
+      if (flagsToday(ctx.db, callerKey(ctx), t) >= FLAGS_PER_AGENT_PER_DAY) {
         throw new TbError("flag_limit", `at most ${FLAGS_PER_AGENT_PER_DAY} flags per agent per day`, 429);
       }
       // only a record that Observer delivered AND that is still delivered; an unknown id, a record never sent, dropped, or
       // already waiting in Review answers exactly like a missing one: no oracle
       if (target?.state !== "delivered") throw notFound("record");
       // TODO(S4): also tag the Knowledge document `observer-flagged` (one document_update through the outbox).
-      const flagId = addFlag(ctx.db, target.id, { type: ctx.caller.type, id: ctx.caller.id }, reason, t);
+      const flagId = addFlag(ctx.db, target.id, { type: ctx.caller.type, id: callerKey(ctx) }, reason, t);
       ctx.statusChanged();
       return { flagId };
     },
@@ -301,7 +314,7 @@ export const handlers = {
     async run(i, ctx) {
       const r = jobRow(ctx.db, i.id);
       if (!r) throw notFound("job");
-      const { row, changed } = transitionJob(ctx.db, r, i.action, ctx.caller.id, now());
+      const { row, changed } = transitionJob(ctx.db, r, i.action, callerKey(ctx), now());
       if (changed) ctx.statusChanged();
       return { job: jobView(row) };
     },
@@ -385,7 +398,7 @@ export const handlers = {
       const r = recordRow(ctx.db, i.recordId);
       if (!r) throw notFound("record");
       // every guard (secret, state, destination, keep, text, held) lives in decideRecord
-      decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, input: i }, ctx.caller.id, now(), getPrivacy(ctx.db).textRetentionDays);
+      decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, input: i }, callerKey(ctx), now(), getPrivacy(ctx.db).textRetentionDays);
       ctx.statusChanged();
       const row = recordRow(ctx.db, i.recordId);
       if (!row) throw notFound("record");
