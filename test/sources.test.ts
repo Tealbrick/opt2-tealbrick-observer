@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
 import { CONNECT_UNAVAILABLE_MESSAGE, type ConnectPort, setConnectFactory } from "../src/connect.ts";
-import { ctxFor, migratedDb, OWNER } from "./helpers.ts";
+import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedJob, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 type Out = Record<string, any>;
@@ -26,7 +26,7 @@ beforeEach(async () => {
   now = Date.UTC(2026, 9, 17, 12, 0, 0);
   setClock(() => now);
   setConnectFactory(null);
-  await definition.onStart?.({ db } as never);
+  await start(db);
 });
 afterEach(() => setConnectFactory(null));
 
@@ -189,6 +189,91 @@ describe("source_update", () => {
       ["c", "d"],
     );
     assert.deepEqual(JSON.parse(String(db.prepare("SELECT exclude_json AS e FROM obs_sources WHERE id = ?").get(src)?.e)), { senders: ["anna@example.com"], domains: ["spam.example"] });
+  });
+  it("compares exclusions the JS way: ÄRGER@Beispiel.de is excluded by ärger@beispiel.de and by the domain BEISPIEL.DE, also in another Unicode form", async () => {
+    const src = seedSource(db);
+    seedMessage(db, src, { id: "upper", author: "email:ÄRGER@Beispiel.de" });
+    seedMessage(db, src, { id: "decomposed", author: "email:A\u0308rger@beispiel.de" }); // A + combining diaeresis
+    seedMessage(db, src, { id: "domain", author: "email:other@BEISPIEL.DE" });
+    seedMessage(db, src, { id: "keep", author: "email:bob@beispiel.com" });
+    seedMessage(db, src, { id: "keep2", author: "email:bob@sub.beispiel.de" });
+    await run("source_update", { id: src, exclude: { senders: ["ärger@beispiel.de"], domains: ["BEISPIEL.DE"] } }, O());
+    assert.deepEqual(
+      db.prepare("SELECT provider_msg_id AS id FROM obs_messages ORDER BY 1").all().map((r) => r.id),
+      ["keep", "keep2"],
+    );
+    // and the other direction: the owner types the capitals, the message is stored in lower case
+    const src2 = seedSource(db);
+    seedMessage(db, src2, { id: "lower", author: "email:ärger@beispiel.de" });
+    await run("source_update", { id: src2, exclude: { senders: ["ÄRGER@Beispiel.de"] } }, O());
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages WHERE source_id = ?").get(src2)?.c, 0);
+  });
+  it("no text of an excluded sender survives anywhere: messages, records, deliveries (unsent deleted, sent emptied), flags", async () => {
+    const src = seedSource(db);
+    const SECRET = "ANNA-PRIVATE-WORDS";
+    const input = JSON.stringify({ title: "doc", body: `${SECRET} and bob's words` });
+    // R1: only Anna → the record goes, with its deliveries and flag
+    const r1 = seedRecord(db, src, { state: "approved", thread: `Re: ${SECRET}` });
+    seedMessage(db, src, { id: "a1", author: "email:anna@example.com", text: SECRET, record: r1 });
+    const d1 = seedDelivery(db, r1, { status: "pending" });
+    db.prepare("UPDATE obs_deliveries SET input_json = ? WHERE id = ?").run(input, d1);
+    // R2: Anna and Bob → stays, new revision, unsent delivery gone, sent delivery keeps the ledger but not the input; approved → review
+    const r2 = seedRecord(db, src, { state: "approved", revision: 1 });
+    seedMessage(db, src, { id: "a2", author: "email:anna@example.com", text: SECRET, record: r2 });
+    seedMessage(db, src, { id: "b2", author: "email:bob@example.com", text: "bob only", record: r2 });
+    const d2 = seedDelivery(db, r2, { status: "failed", destination: "kanban" });
+    const d3 = seedDelivery(db, r2, { status: "sent", destination: "knowledge", targetRef: "doc_2" });
+    db.prepare("UPDATE obs_deliveries SET input_json = ? WHERE id IN (?, ?)").run(input, d2, d3);
+    // R3: only Bob → untouched
+    const r3 = seedRecord(db, src, { state: "approved" });
+    seedMessage(db, src, { id: "b3", author: "email:bob@example.com", text: "bob again", record: r3 });
+    const d4 = seedDelivery(db, r3, { status: "pending" });
+    db.prepare("UPDATE obs_deliveries SET input_json = ? WHERE id = ?").run(input.replace(SECRET, "bob"), d4);
+    db.prepare("INSERT INTO obs_flags (id, record_id, by_type, by_id, reason, created_at) VALUES ('flg_1', ?, 'agent', 'agt_x', ?, 1)").run(r1, `about ${SECRET}`);
+
+    const ctx = O();
+    await run("source_update", { id: src, exclude: { senders: ["Anna@example.com"] } }, ctx);
+    assert.equal(ctx.statusChanges, 1);
+
+    const dump = JSON.stringify(["obs_messages", "obs_records", "obs_deliveries", "obs_flags"].map((t) => db.prepare(`SELECT * FROM ${t}`).all()));
+    assert.ok(!dump.includes(SECRET), "the excluded sender's text is gone from every table");
+    assert.deepEqual(db.prepare("SELECT id FROM obs_records ORDER BY id").all().map((r) => r.id).sort(), [r2, r3].sort());
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_flags").get()?.c, 0);
+    const rec2 = db.prepare("SELECT state, revision FROM obs_records WHERE id = ?").get(r2);
+    assert.deepEqual([rec2?.state, rec2?.revision], ["review", 2]);
+    assert.equal(db.prepare("SELECT state FROM obs_records WHERE id = ?").get(r3)?.state, "approved");
+    const left = db.prepare("SELECT id, status, input_json FROM obs_deliveries ORDER BY id").all().map((r) => ({ ...r }));
+    assert.deepEqual(left.map((d) => [d.id, d.status, d.input_json === "{}"]).sort(), [[d3, "sent", true], [d4, "pending", false]].sort());
+    assert.deepEqual(db.prepare("SELECT provider_msg_id AS id FROM obs_messages ORDER BY 1").all().map((r) => r.id), ["b2", "b3"]);
+  });
+  it("narrowing the conversations does the same cleaning; widening or an unchanged list cleans nothing", async () => {
+    const src = seedSource(db, { conversations: ["inbox", "hr"] });
+    const rec = seedRecord(db, src, { state: "approved" });
+    seedMessage(db, src, { id: "h1", conversation: "hr", record: rec, text: "HR-PRIVATE" });
+    seedDelivery(db, rec, { status: "pending" });
+    await run("source_update", { id: src, conversations: ["inbox", "hr", "ops"] }, O());
+    await run("source_update", { id: src, label: "Same" }, O());
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 1);
+    await run("source_update", { id: src, conversations: ["inbox"] }, O());
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_records").get()?.c, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages").get()?.c, 0);
+  });
+  it("refuses an empty conversation list (conversations_empty, 400) and changes nothing", async () => {
+    const src = seedSource(db, { conversations: ["inbox"] });
+    seedMessage(db, src, { id: "m1" });
+    await rejects(run("source_update", { id: src, conversations: [] }, O()), "conversations_empty", 400);
+    assert.equal(db.prepare("SELECT conversations_json AS c FROM obs_sources WHERE id = ?").get(src)?.c, '["inbox"]');
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages").get()?.c, 1);
+    assert.deepEqual((await run("source_update", { id: src, conversations: ["inbox"] }, O())).source.conversations, ["inbox"], "a non-empty list works");
+  });
+  it("a damaged exclude_json fails closed (exclude_corrupt, 500) instead of meaning 'exclude nobody'", async () => {
+    for (const bad of ["{not json", "[]", "null", '{"senders":"anna","domains":[]}', '{"senders":[],"domains":[1]}', '{"senders":[]}']) {
+      const src = seedSource(db);
+      db.prepare("UPDATE obs_sources SET exclude_json = ? WHERE id = ?").run(bad, src);
+      await rejects(run("source_update", { id: src, label: "x" }, O()), "exclude_corrupt", 500);
+      assert.notEqual(db.prepare("SELECT label FROM obs_sources WHERE id = ?").get(src)?.label, "x", `${bad} changed nothing`);
+    }
   });
   it("answers not_found for a missing source and label_empty for a blank label", async () => {
     await rejects(run("source_update", { id: "src_01J00000000000000000000000", label: "x" }, O()), "not_found", 404);

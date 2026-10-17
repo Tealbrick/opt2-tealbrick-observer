@@ -3,7 +3,7 @@
 //
 // Privacy shape (DESIGN §5.5, §5.7): message text lives only in obs_messages.text and is returned only by the person
 // record views (recordView with messages). The agent `status` view is built here from labels and counts alone.
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
@@ -184,13 +184,22 @@ function parseList(json: unknown): string[] {
     return [];
   }
 }
+/** The stored exclusions. A damaged value THROWS: empty exclusions would silently read the senders the owner excluded. */
 export function excludeOf(r: Row): Exclude {
+  const broken = () => new TbError("exclude_corrupt", "the stored exclusions of this source are damaged; refusing to use them", 500);
+  let v: unknown;
   try {
-    const v = JSON.parse(str(r.exclude_json)) as Partial<Exclude>;
-    return { senders: Array.isArray(v.senders) ? v.senders.map(String) : [], domains: Array.isArray(v.domains) ? v.domains.map(String) : [] };
+    v = JSON.parse(str(r.exclude_json));
   } catch {
-    return { senders: [], domains: [] };
+    throw broken();
   }
+  if (!v || typeof v !== "object" || Array.isArray(v)) throw broken();
+  const { senders, domains } = v as { senders?: unknown; domains?: unknown };
+  const list = (x: unknown): string[] => {
+    if (!Array.isArray(x) || !x.every((e) => typeof e === "string")) throw broken();
+    return x as string[];
+  };
+  return { senders: list(senders), domains: list(domains) };
 }
 export function conversationsOf(r: Row): string[] {
   return parseList(r.conversations_json);
@@ -199,33 +208,44 @@ export function conversationsOf(r: Row): string[] {
 /** Source view. Labels, kinds and counts only: no message text, sender or conversation title is ever read here except the
  *  owner-chosen conversation ids, which only the person views (`withConversations`) return. */
 export function sourceView(db: Db, r: Row): SourceView {
+  return sourceParts(db, r).view;
+}
+function sourceParts(db: Db, r: Row): { view: SourceView; liveJobId: string | null; historyJobId: string | null } {
   const jobs = db.prepare("SELECT * FROM obs_jobs WHERE source_id = ? ORDER BY created_at DESC, id DESC").all(str(r.id));
   const live = jobs.find((j) => j.kind === "live");
   const hist = jobs.find((j) => j.kind === "backfill");
   return {
-    id: str(r.id),
-    label: str(r.label),
-    kind: str(r.kind),
-    account: str(r.account),
-    conversations: conversationsOf(r),
-    // TODO(S2): lastReadAt needs a column the job runner writes after each page (obs_jobs has none yet); null until then.
-    live: { state: live ? str(live.state) : "none", lastReadAt: null, nextAt: live ? iso(live.retry_at) : null },
-    history: {
-      state: hist ? str(hist.state) : "none",
-      done: hist ? Number(hist.read_count) : 0,
-      total: hist && hist.max_messages !== null ? Number(hist.max_messages) : null,
-      since: hist ? iso(hist.since_at) : null,
+    view: {
+      id: str(r.id),
+      label: str(r.label),
+      kind: str(r.kind),
+      account: str(r.account),
+      conversations: conversationsOf(r),
+      // TODO(S2): lastReadAt needs a column the job runner writes after each page (obs_jobs has none yet); null until then.
+      live: { state: live ? str(live.state) : "none", lastReadAt: null, nextAt: live ? iso(live.retry_at) : null },
+      history: {
+        state: hist ? str(hist.state) : "none",
+        done: hist ? Number(hist.read_count) : 0,
+        total: hist && hist.max_messages !== null ? Number(hist.max_messages) : null,
+        since: hist ? iso(hist.since_at) : null,
+      },
     },
+    liveJobId: live ? str(live.id) : null,
+    historyJobId: hist ? str(hist.id) : null,
   };
 }
 
 /** The agent view of the sources: labels and counts only (DESIGN §3.1, §5.7). Built field by field so a new column can never leak. */
-export function statusView(db: Db): { sources: Pick<SourceView, "id" | "label" | "kind" | "live" | "history">[]; review: { waiting: number } } {
+export function statusView(db: Db): {
+  sources: (Pick<SourceView, "id" | "label" | "kind" | "live" | "history"> & { liveJobId: string | null; historyJobId: string | null })[];
+  review: { waiting: number };
+} {
   const rows = db.prepare("SELECT * FROM obs_sources ORDER BY created_at, id LIMIT 100").all();
   return {
     sources: rows.map((r) => {
-      const v = sourceView(db, r);
-      return { id: v.id, label: v.label, kind: v.kind, live: v.live, history: v.history };
+      const { view: v, liveJobId, historyJobId } = sourceParts(db, r);
+      // job ids so an agent can pause a job (job_pause); ids only, no text
+      return { id: v.id, label: v.label, kind: v.kind, live: v.live, history: v.history, liveJobId, historyJobId };
     }),
     review: { waiting: pendingCount(db) },
   };
@@ -264,32 +284,78 @@ export function createSource(db: Db, s: NewSource, now: number): { source: strin
   return { source, job };
 }
 
-const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
-/** Delete stored messages that a source no longer may hold (a narrowed conversation list, new exclusions): "narrowing applies at once". */
-export function dropOutOfScope(db: Db, sourceId: string, removedConversations: string[], exclude: Exclude | null): number {
-  let n = 0;
-  if (removedConversations.length > 0) {
-    const marks = removedConversations.map(() => "?").join(", ");
-    n += db.prepare(`DELETE FROM obs_messages WHERE source_id = ? AND conversation IN (${marks})`).run(sourceId, ...removedConversations).changes;
+// ── author keys and exclusions. SQLite lower() only folds ASCII, so "ÄRGER@Beispiel.de" would survive an exclusion of
+// "ärger@beispiel.de". The key is made in JS (NFC + toLowerCase) when a message is stored and compared in JS.
+export function authorKey(ref: string): string {
+  return ref.normalize("NFC").toLowerCase();
+}
+const valuePart = (key: string): string => key.slice(key.indexOf(":") + 1);
+/** Does the exclusion list hide this author? `senders` match the whole handle or its value part, `domains` the part after "@". */
+export function isExcluded(key: string, ex: Exclude): boolean {
+  const value = valuePart(key);
+  const at = value.lastIndexOf("@");
+  for (const s of ex.senders) {
+    const k = authorKey(s);
+    if (key === k || value === k) return true;
   }
-  if (exclude) {
-    // author_ref is "<channel>:<value>"; a sender matches the whole ref or the value part, a domain matches "…@domain"
-    for (const s of exclude.senders) {
-      const v = s.toLowerCase();
-      n += db
-        .prepare("DELETE FROM obs_messages WHERE source_id = ? AND (lower(author_ref) = ? OR lower(substr(author_ref, instr(author_ref, ':') + 1)) = ?)")
-        .run(sourceId, v, v).changes;
-    }
-    for (const d of exclude.domains) {
-      n += db.prepare("DELETE FROM obs_messages WHERE source_id = ? AND lower(author_ref) LIKE ? ESCAPE '\\'").run(sourceId, `%@${likeEscape(d.toLowerCase())}`).changes;
-    }
+  if (at >= 0) {
+    const domain = value.slice(at + 1);
+    for (const d of ex.domains) if (domain === authorKey(d).replace(/^@/, "")) return true;
   }
-  return n;
+  return false;
+}
+
+/**
+ * After messages of a record were deleted (narrowing) or their text purged: nothing of the removed text may survive in a
+ * record, a delivery or a flag. Same transaction as the delete (the caller's).
+ *  - unsent deliveries of the record are deleted (they would send the removed text), a sent one keeps its ledger row but its
+ *    stored input is emptied (from S4 it holds the text that was sent)
+ *  - narrowing: a record left with no message is deleted with its deliveries and flags; a record that keeps some messages
+ *    gets a new revision (its content changed) and goes back to Review if it was approved
+ *  - purge: message ids stay, so no record is deleted; thread subjects are nulled; an approved record goes back to Review
+ */
+function scrubRecords(db: Db, recordIds: Iterable<string>, mode: "narrow" | "purge", now: number): void {
+  for (const id of new Set(recordIds)) {
+    if (mode === "narrow" && Number(db.prepare("SELECT COUNT(*) AS c FROM obs_messages WHERE record_id = ?").get(id)?.c ?? 0) === 0) {
+      db.prepare("DELETE FROM obs_flags WHERE record_id = ?").run(id);
+      db.prepare("DELETE FROM obs_deliveries WHERE record_id = ?").run(id);
+      db.prepare("DELETE FROM obs_records WHERE id = ?").run(id);
+      continue;
+    }
+    db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent'").run(id);
+    db.prepare("UPDATE obs_deliveries SET input_json = '{}', updated_at = ? WHERE record_id = ? AND status = 'sent'").run(now, id);
+    db.prepare(
+      `UPDATE obs_records SET state = CASE WHEN state = 'approved' THEN 'review' ELSE state END,
+         revision = revision + ?, thread = CASE WHEN ? = 'purge' THEN NULL ELSE thread END, updated_at = ? WHERE id = ?`,
+    ).run(mode === "narrow" ? 1 : 0, mode, now, id);
+  }
+}
+
+/** Delete stored messages that a source no longer may hold (a narrowed conversation list, new exclusions): "narrowing applies at
+ *  once", and no text of an excluded sender survives in messages, records or deliveries. One transaction. */
+export function dropOutOfScope(db: Db, sourceId: string, removedConversations: string[], exclude: Exclude | null, now: number): number {
+  return db.transaction(() => {
+    const doomed = new Map<string, { conversation: string; id: string; record: string | null }>();
+    const take = (r: Row) => doomed.set(`${str(r.conversation)}\u0000${str(r.provider_msg_id)}`, { conversation: str(r.conversation), id: str(r.provider_msg_id), record: strOrNull(r.record_id) });
+    if (removedConversations.length > 0) {
+      const marks = removedConversations.map(() => "?").join(", ");
+      for (const r of db.prepare(`SELECT conversation, provider_msg_id, record_id FROM obs_messages WHERE source_id = ? AND conversation IN (${marks})`).all(sourceId, ...removedConversations)) take(r);
+    }
+    if (exclude && (exclude.senders.length > 0 || exclude.domains.length > 0)) {
+      for (const r of db.prepare("SELECT conversation, provider_msg_id, record_id, author_key FROM obs_messages WHERE source_id = ?").all(sourceId)) if (isExcluded(str(r.author_key), exclude)) take(r);
+    }
+    const del = db.prepare("DELETE FROM obs_messages WHERE source_id = ? AND conversation = ? AND provider_msg_id = ?");
+    for (const m of doomed.values()) del.run(sourceId, m.conversation, m.id);
+    scrubRecords(db, [...doomed.values()].flatMap((m) => (m.record ? [m.record] : [])), "narrow", now);
+    return doomed.size;
+  });
 }
 
 /**
  * Remove a source: cancel its jobs, delete stored text, message ids, records, deliveries ledger and flags, then the source.
- * One transaction. Documents already delivered to Knowledge stay (the owner deletes them there).
+ * One transaction. Documents already delivered to Knowledge stay (the owner deletes them there). This deletes EVERYTHING of the
+ * source by design; the privacy setting `onSourceDelete` is NOT consulted here: it is about deletions on the PROVIDER side
+ * (a message the provider deleted, DESIGN §5.5), not about the owner removing a source.
  * TODO(S2): also cancel the SDK jobs (`sdk_job_id`) with the runner.
  */
 export function removeSource(db: Db, id: string, now: number): { messagesPurged: number; sdkJobs: string[] } {
@@ -311,19 +377,30 @@ export function removeSource(db: Db, id: string, now: number): { messagesPurged:
   });
 }
 
-/** Delete stored message TEXT now (ids and digests stay so nothing is read twice). Returns how many texts went. */
-export function purgeText(db: Db, f: { source?: string; before?: number }): number {
-  const where = ["text IS NOT NULL"];
-  const args: unknown[] = [];
-  if (f.source !== undefined) {
-    where.push("source_id = ?");
-    args.push(f.source);
-  }
-  if (f.before !== undefined) {
-    where.push("sent_at < ?");
-    args.push(f.before);
-  }
-  return db.prepare(`UPDATE obs_messages SET text = NULL WHERE ${where.join(" AND ")}`).run(...args).changes;
+/** Delete stored message TEXT now (ids, digests, author and conversation stay so nothing is read twice; thread subjects go).
+ *  Returns how many texts went. Unsent deliveries of the touched records go too and sent ones lose their stored input. */
+export function purgeText(db: Db, f: { source?: string; before?: number }, now: number): number {
+  return db.transaction(() => {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (f.source !== undefined) {
+      where.push("source_id = ?");
+      args.push(f.source);
+    }
+    if (f.before !== undefined) {
+      where.push("sent_at < ?");
+      args.push(f.before);
+    }
+    const w = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+    const texts = Number(db.prepare(`SELECT COUNT(*) AS c FROM obs_messages${w}${w ? " AND" : " WHERE"} text IS NOT NULL`).get(...args)?.c ?? 0);
+    const records = db
+      .prepare(`SELECT DISTINCT record_id FROM obs_messages${w}${w ? " AND" : " WHERE"} record_id IS NOT NULL AND (text IS NOT NULL OR thread IS NOT NULL)`)
+      .all(...args)
+      .map((r) => str(r.record_id));
+    db.prepare(`UPDATE obs_messages SET text = NULL, thread = NULL${w}`).run(...args);
+    scrubRecords(db, records, "purge", now);
+    return texts;
+  });
 }
 
 // ───────────────────────────────────────────────────────────────────────── records
@@ -458,10 +535,11 @@ export interface DeliveryView {
   lastError: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** e.g. "may_duplicate: …", kept on the row (set by a retry after 23 h) */
   warning: string | null;
 }
 /** The stored input (`input_json`) is NOT part of the view: from S4 it holds the text that is sent. */
-export function deliveryView(r: Row, warning: string | null = null): DeliveryView {
+export function deliveryView(r: Row): DeliveryView {
   return {
     id: str(r.id),
     recordId: str(r.record_id),
@@ -475,22 +553,46 @@ export function deliveryView(r: Row, warning: string | null = null): DeliveryVie
     lastError: r.last_error === null || r.last_error === undefined ? null : str(r.last_error).slice(0, 280),
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
-    warning,
+    warning: strOrNull(r.warning),
   };
 }
 export function deliveryRow(db: Db, id: string): Row | undefined {
   return db.prepare("SELECT * FROM obs_deliveries WHERE id = ?").get(id);
 }
 
+/** A record that held a secret: the `secret` column (set when the secret was removed before storage) or a `secret` class in
+ *  pii_json. Such a record can only be dropped, whatever a rule or the owner's click says (DESIGN §5.3). */
+export function isSecretRecord(r: Row): boolean {
+  return Number(r.secret) === 1 || (parsePii(r.pii_json).secret ?? 0) > 0;
+}
+
+/**
+ * The router's FIRST step (S3 builds the rest): a secret record is dropped by rule 0 before any rule is looked at, so no rule
+ * the owner writes (also a catch-all one) can ever deliver it. `matches` is S3's rule matcher; it is not called for a secret.
+ */
+export type Route = { kind: "drop"; ruleId: string; reason: "secret" } | { kind: "rule"; ruleId: string } | { kind: "review" };
+export function routeRecord(record: Row, rules: readonly RuleView[], matches: (rule: RuleView, record: Row) => boolean): Route {
+  if (isSecretRecord(record)) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
+  const hit = rules.find((rule) => rule.id !== RULE_ZERO_ID && matches(rule, record));
+  return hit ? { kind: "rule", ruleId: hit.id } : { kind: "review" };
+}
+
+export type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";
 /**
  * The owner decides a waiting record. Secret records: only drop (checked by the caller, which owns the error).
- * drop → state `dropped`, text goes after the retention. deliver / deliver_redacted → state `approved` + one outbox row in
- * status `pending` with the idempotency key and the exact decide input. SENDING is S4 (nothing is called here).
+ *  drop → state `dropped`, text goes after the retention.
+ *  keep → a flagged record goes back to `delivered`; no new delivery.
+ *  deliver / deliver_redacted → state `approved` + ONE outbox row per (record, revision, destination) in status `pending`
+ *    with the idempotency key and the exact decide input. SENDING is S4 (nothing is called here).
+ * Deciding again on a row that is not sent (failed, pending, held): the NEW decision wins. The row is overwritten (input, status,
+ * attempts, hold, next time, error, warning); if an attempt was made before, it gets a new key, because the destination may
+ * hold the old input under the old key.
+ * Every decision closes the open flags of the record.
  */
 export function decideRecord(
   db: Db,
   r: Row,
-  d: { decision: "deliver" | "deliver_redacted" | "drop"; destination: Destination | null; input: unknown },
+  d: { decision: Decision; destination: Destination | null; input: unknown },
   by: string,
   now: number,
   textRetentionDays: number,
@@ -498,63 +600,84 @@ export function decideRecord(
   db.transaction(() => {
     const id = str(r.id);
     const revision = Number(r.revision);
-    if (d.decision === "drop") {
-      db.prepare("UPDATE obs_records SET state = 'dropped', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, now + textRetentionDays * DAY_MS, now, id);
-      return;
+    const purgeAt = now + textRetentionDays * DAY_MS;
+    if (d.decision === "keep") {
+      db.prepare("UPDATE obs_records SET state = 'delivered', decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ?").run(by, now, now, id);
+    } else if (d.decision === "drop") {
+      db.prepare("UPDATE obs_records SET state = 'dropped', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, purgeAt, now, id);
+    } else {
+      const dest = d.destination as Destination;
+      const input = JSON.stringify(d.input);
+      const existing = db.prepare("SELECT * FROM obs_deliveries WHERE record_id = ? AND revision = ? AND destination = ?").get(id, revision, dest);
+      if (existing && str(existing.status) === "sent") throw new TbError("already_delivered", "this revision of the record was already delivered to this destination", 409);
+      if (!existing) {
+        db.prepare(
+          `INSERT INTO obs_deliveries (id, record_id, revision, destination, idem_key, input_json, status, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
+        ).run(`dlv_${ulid(now)}`, id, revision, dest, deliveryKey(id, revision, dest), input, now, now);
+      } else {
+        const attempted = existing.first_attempt_at !== null && existing.first_attempt_at !== undefined;
+        db.prepare(
+          `UPDATE obs_deliveries SET input_json = ?, status = 'pending', attempts = 0, hold_id = NULL, next_at = NULL, first_attempt_at = NULL,
+             last_error = NULL, warning = NULL, idem_key = ?, updated_at = ? WHERE id = ?`,
+        ).run(input, attempted ? deliveryKey(id, revision, dest, now) : str(existing.idem_key), now, str(existing.id));
+      }
+      db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, purgeAt, now, id);
     }
-    const dest = d.destination as Destination;
-    const key = deliveryKey(id, revision, dest);
-    const existing = db.prepare("SELECT * FROM obs_deliveries WHERE idem_key = ?").get(key);
-    if (existing && str(existing.status) === "sent") throw new TbError("already_delivered", "this revision of the record was already delivered to this destination", 409);
-    if (!existing) {
-      db.prepare(
-        `INSERT INTO obs_deliveries (id, record_id, revision, destination, idem_key, input_json, status, attempts, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)`,
-      ).run(`dlv_${ulid(now)}`, id, revision, dest, key, JSON.stringify(d.input), now, now);
-    }
-    db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, now + textRetentionDays * DAY_MS, now, id);
+    db.prepare("UPDATE obs_flags SET closed_at = ? WHERE record_id = ? AND closed_at IS NULL").run(now, id);
   });
+}
+
+/** Does this record have a delivery Observer sent? (a `keep` makes sense only then) */
+export function hasSentDelivery(db: Db, recordId: string): boolean {
+  return !!db.prepare("SELECT 1 AS x FROM obs_deliveries WHERE record_id = ? AND status = 'sent'").get(recordId);
 }
 
 /**
  * Retry a delivery: S1 changes the row only (failed → pending); the send is S4. Inside 23 h of the first attempt the SAME
  * stored key is kept (idempotent re-send). After that the SDK's 24 h idempotency can no longer protect the call: a NEW key is
- * made and the row says it may duplicate.
+ * made and the row keeps a may_duplicate warning (shown by deliveries_list).
  */
 export function retryDelivery(db: Db, r: Row, now: number): DeliveryView {
   if (str(r.status) !== "failed") throw new TbError("delivery_state_invalid", `cannot retry a delivery that is ${str(r.status)}`, 409);
   const first = r.first_attempt_at === null || r.first_attempt_at === undefined ? null : Number(r.first_attempt_at);
   const stale = first !== null && now - first > SAME_KEY_WINDOW_MS;
   const key = stale ? deliveryKey(str(r.record_id), Number(r.revision), str(r.destination), now) : str(r.idem_key);
-  db.prepare("UPDATE obs_deliveries SET status = 'pending', idem_key = ?, first_attempt_at = ?, next_at = ?, last_error = NULL, hold_id = NULL, updated_at = ? WHERE id = ?").run(
+  const warning = stale ? "may_duplicate: the first attempt was more than 23 hours ago, so the destination may now hold a copy" : strOrNull(r.warning);
+  db.prepare("UPDATE obs_deliveries SET status = 'pending', idem_key = ?, first_attempt_at = ?, next_at = ?, last_error = NULL, hold_id = NULL, warning = ?, updated_at = ? WHERE id = ?").run(
     key,
     stale ? null : first,
     now,
+    warning,
     now,
     str(r.id),
   );
   const row = deliveryRow(db, str(r.id));
   if (!row) throw notFound("delivery");
-  return deliveryView(row, stale ? "may_duplicate: the first attempt was more than 23 hours ago, so the destination may now hold a copy" : null);
+  return deliveryView(row);
 }
 
 // ───────────────────────────────────────────────────────────────────────── flags (agent)
-/** A record counts as delivered by Observer when one of its outbox rows is `sent`. documentId is matched with target_ref. */
-export function deliveredRecordId(db: Db, i: { recordId?: string; documentId?: string }): string | null {
-  let byRecord: string | null = null;
-  let byDocument: string | null = null;
-  if (i.recordId !== undefined) {
-    const r = db.prepare("SELECT d.record_id AS id FROM obs_deliveries d WHERE d.record_id = ? AND d.status = 'sent' LIMIT 1").get(i.recordId);
-    if (!r) return null;
-    byRecord = str(r.id);
-  }
-  if (i.documentId !== undefined) {
-    const r = db.prepare("SELECT d.record_id AS id FROM obs_deliveries d WHERE d.target_ref = ? AND d.status = 'sent' LIMIT 1").get(i.documentId);
-    if (!r) return null;
-    byDocument = str(r.id);
-  }
+/** The record Observer delivered that `recordId` / `documentId` name: it has a `sent` outbox row (documentId = its target_ref).
+ *  When both are given they must name the same record. null = unknown or never delivered. */
+export function deliveredRecord(db: Db, i: { recordId?: string; documentId?: string }): { id: string; state: string } | null {
+  const find = (sql: string, v: string): string | null => {
+    const r = db.prepare(sql).get(v);
+    return r ? str(r.id) : null;
+  };
+  const byRecord = i.recordId !== undefined ? find("SELECT d.record_id AS id FROM obs_deliveries d WHERE d.record_id = ? AND d.status = 'sent' LIMIT 1", i.recordId) : null;
+  const byDocument = i.documentId !== undefined ? find("SELECT d.record_id AS id FROM obs_deliveries d WHERE d.target_ref = ? AND d.status = 'sent' LIMIT 1", i.documentId) : null;
+  if (i.recordId !== undefined && byRecord === null) return null;
+  if (i.documentId !== undefined && byDocument === null) return null;
   if (byRecord !== null && byDocument !== null && byRecord !== byDocument) return null;
-  return byRecord ?? byDocument;
+  const id = byRecord ?? byDocument;
+  const rec = id ? db.prepare("SELECT id, state FROM obs_records WHERE id = ?").get(id) : undefined;
+  return rec ? { id: str(rec.id), state: str(rec.state) } : null;
+}
+/** The flag this agent already has open on the record (one open flag per agent and record). */
+export function openFlag(db: Db, agent: string, recordId: string): string | null {
+  const r = db.prepare("SELECT id FROM obs_flags WHERE by_id = ? AND record_id = ? AND closed_at IS NULL ORDER BY created_at, id LIMIT 1").get(agent, recordId);
+  return r ? str(r.id) : null;
 }
 export function flagsToday(db: Db, agent: string, now: number): number {
   return Number(db.prepare("SELECT COUNT(*) AS c FROM obs_flags WHERE by_id = ? AND created_at > ?").get(agent, now - DAY_MS)?.c ?? 0);
@@ -567,6 +690,23 @@ export function addFlag(db: Db, recordId: string, by: { type: string; id: string
     db.prepare("UPDATE obs_records SET state = 'review', decided_by = NULL, decided_at = NULL, updated_at = ? WHERE id = ?").run(now, recordId);
   });
   return id;
+}
+
+// ───────────────────────────────────────────────────────────────────────── digests
+/** text_digest = HMAC-SHA256 under the app secret `obs_digest_key` (a plain hash of a short message can be guessed). */
+export const DIGEST_KEY_NAME = "obs_digest_key";
+export function textDigest(key: string, text: string): string {
+  return `hmac-sha256:${createHmac("sha256", key).update(text, "utf8").digest("hex")}`;
+}
+let digestKey: string | null = null;
+/** Bound once in onStart (the key comes from ctx.secrets). */
+export function bindDigestKey(key: string | null): void {
+  digestKey = key;
+}
+/** The digest S2's ingestion stores for a message text. Refuses to run before the key is bound (never an unkeyed hash). */
+export function digestOf(text: string): string {
+  if (!digestKey) throw new TbError("digest_key_missing", "the digest key is not available", 500);
+  return textDigest(digestKey, text);
 }
 
 // ───────────────────────────────────────────────────────────────────────── rules

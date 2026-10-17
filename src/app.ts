@@ -10,6 +10,7 @@
 // S1 scope: the owner ops on the real tables. NOT here yet: reading sources (needs Connect's data_* ops, spec request R3 →
 // `connect_unavailable`), the job runner (S2), classification (S3), sending deliveries (S4), the UI (S5), retention jobs (S6).
 
+import { randomBytes } from "node:crypto";
 import type { OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { type Db, defineApp, type HandlerSpec, type SdkAppDefinition, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import {
@@ -55,12 +56,14 @@ import {
   addFlag,
   BACKFILL_DEFAULT_MAX_MESSAGES,
   BACKFILL_MAX_YEARS,
+  bindDigestKey,
   conversationsOf,
   createBackfill,
   createSource,
+  DIGEST_KEY_NAME,
   decideRecord,
   deleteRule,
-  deliveredRecordId,
+  deliveredRecord,
   deliveryRow,
   deliveryView,
   dropOutOfScope,
@@ -69,12 +72,15 @@ import {
   FLAGS_PER_AGENT_PER_DAY,
   flagsToday,
   getPrivacy,
+  hasSentDelivery,
+  isSecretRecord,
   jobRow,
   jobView,
   listJobs,
   listRules,
   listSources,
   notFound,
+  openFlag,
   pageOf,
   parseDate,
   pendingCount,
@@ -143,8 +149,9 @@ export const handlers = {
     redact: (i) => `pause job ${i.jobId}`,
     async run(i, ctx) {
       // pause only: start, resume and cancel are owner-only (job_control is a person op)
+      // ONE answer for an unknown id and for a job that cannot be paused (done, failed, cancelled): no 404/409 oracle
       const r = jobRow(ctx.db, i.jobId);
-      if (!r) throw notFound("job");
+      if (!r || !["queued", "running", "waiting", "paused"].includes(String(r.state))) throw notFound("job");
       const { row, changed } = transitionJob(ctx.db, r, "pause", ctx.caller.id, now());
       if (changed) ctx.statusChanged();
       return { job: { id: String(row.id), state: String(row.state) } };
@@ -156,15 +163,19 @@ export const handlers = {
       if (i.recordId === undefined && i.documentId === undefined) throw new TbError("flag_target_missing", "give recordId or documentId", 400);
       const reason = nonEmpty(i.reason, "reason");
       const t = now();
-      // the cap comes first, so a capped agent learns nothing about which ids exist
+      const target = deliveredRecord(ctx.db, i);
+      // flagging the same record again is idempotent: the agent gets its open flag back, no new row, no cap use
+      const open = target ? openFlag(ctx.db, ctx.caller.id, target.id) : null;
+      if (open) return { flagId: open };
+      // the cap comes before the lookup answer, so a capped agent learns nothing about which ids exist
       if (flagsToday(ctx.db, ctx.caller.id, t) >= FLAGS_PER_AGENT_PER_DAY) {
         throw new TbError("flag_limit", `at most ${FLAGS_PER_AGENT_PER_DAY} flags per agent per day`, 429);
       }
-      // an id Observer did not deliver (unknown, never sent, dropped) answers exactly like a missing one: no oracle
-      const recordId = deliveredRecordId(ctx.db, i);
-      if (!recordId) throw notFound("record");
+      // only a record that Observer delivered AND that is still delivered; an unknown id, a record never sent, dropped, or
+      // already waiting in Review answers exactly like a missing one: no oracle
+      if (target?.state !== "delivered") throw notFound("record");
       // TODO(S4): also tag the Knowledge document `observer-flagged` (one document_update through the outbox).
-      const flagId = addFlag(ctx.db, recordId, { type: ctx.caller.type, id: ctx.caller.id }, reason, t);
+      const flagId = addFlag(ctx.db, target.id, { type: ctx.caller.type, id: ctx.caller.id }, reason, t);
       ctx.statusChanged();
       return { flagId };
     },
@@ -227,6 +238,8 @@ export const handlers = {
       const label = i.label !== undefined ? nonEmpty(i.label, "label") : String(r.label);
       const before = conversationsOf(r);
       const conversations = i.conversations !== undefined ? [...new Set(i.conversations)] : before;
+      if (conversations.length === 0) throw new TbError("conversations_empty", "a source needs at least one conversation (remove the source to stop watching)", 400);
+      // TODO(S2): check the conversation ids against Connect's catalog, and re-run the estimate when the list widens.
       const oldEx = excludeOf(r);
       const exclude = { senders: i.exclude?.senders ?? oldEx.senders, domains: i.exclude?.domains ?? oldEx.domains };
       const retention = i.retentionDays !== undefined ? i.retentionDays : r.retention_days === null ? null : Number(r.retention_days);
@@ -235,14 +248,15 @@ export const handlers = {
           .prepare("UPDATE obs_sources SET label = ?, conversations_json = ?, exclude_json = ?, live_interval_s = ?, retention_days = ?, updated_at = ? WHERE id = ?")
           .run(label, JSON.stringify(conversations), JSON.stringify(exclude), i.liveIntervalS ?? Number(r.live_interval_s), retention, now(), i.id);
         // narrowing applies at once: stored messages the source may no longer hold go now.
-        // TODO(S2): widening (new conversations) re-runs the estimate through Connect.
         dropOutOfScope(
           ctx.db,
           i.id,
           before.filter((c) => !conversations.includes(c)),
           i.exclude ? exclude : null,
+          now(),
         );
       });
+      ctx.statusChanged();
       return { source: sourceView(ctx.db, needSource(ctx.db, i.id)) };
     },
   }),
@@ -359,11 +373,13 @@ export const handlers = {
     async run(i, ctx) {
       const r = recordRow(ctx.db, i.recordId);
       if (!r) throw notFound("record");
-      // a record with a secret in it can only be dropped, whatever its state (DESIGN §5.3)
-      if (Number(r.secret) === 1 && i.decision !== "drop") throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
+      // a record with a secret in it can only be dropped, whatever its state (DESIGN §5.3): the column and the pii class both count
+      if (isSecretRecord(r) && i.decision !== "drop") throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
       if (String(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${String(r.state)}, not waiting for review`, 409);
-      if (i.decision === "drop") {
-        if (i.destination !== undefined && i.destination !== "drop") throw new TbError("destination_invalid", "a dropped record has no destination", 400);
+      if (i.decision === "drop" || i.decision === "keep") {
+        if (i.destination !== undefined && (i.decision === "keep" || i.destination !== "drop")) throw new TbError("destination_invalid", `a ${i.decision === "keep" ? "kept" : "dropped"} record has no destination`, 400);
+        // keep = the owner reviewed a flagged record and leaves the delivered document as it is
+        if (i.decision === "keep" && !hasSentDelivery(ctx.db, i.recordId)) throw new TbError("nothing_to_keep", "this record was never delivered, so there is nothing to keep", 409);
       } else {
         if (i.destination === undefined) throw new TbError("destination_required", "choose where to deliver the record", 400);
         if (i.destination === "drop") throw new TbError("destination_invalid", "choose knowledge, kanban or inbox", 400);
@@ -371,7 +387,7 @@ export const handlers = {
       decideRecord(
         ctx.db,
         r,
-        { decision: i.decision, destination: i.decision === "drop" ? null : (i.destination as "knowledge" | "kanban" | "inbox"), input: i },
+        { decision: i.decision, destination: i.decision === "drop" || i.decision === "keep" ? null : (i.destination as "knowledge" | "kanban" | "inbox"), input: i },
         ctx.caller.id,
         now(),
         getPrivacy(ctx.db).textRetentionDays,
@@ -415,6 +431,9 @@ export const handlers = {
     async run(i, ctx) {
       const r = deliveryRow(ctx.db, i.id);
       if (!r) throw notFound("delivery");
+      // a secret record is never delivered, also not by a retry of a row that was written before the secret was found
+      const rec = recordRow(ctx.db, String(r.record_id));
+      if (rec && isSecretRecord(rec)) throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
       // S1: the row changes (failed → pending); S4 sends it with the stored key
       return { delivery: retryDelivery(ctx.db, r, now()) };
     },
@@ -440,7 +459,7 @@ export const handlers = {
     async run(i, ctx) {
       if (i.source !== undefined) needSource(ctx.db, i.source);
       const before = i.before !== undefined ? parseDate(i.before, "before") : undefined;
-      return { purged: purgeText(ctx.db, { ...(i.source !== undefined ? { source: i.source } : {}), ...(before !== undefined ? { before } : {}) }) };
+      return { purged: purgeText(ctx.db, { ...(i.source !== undefined ? { source: i.source } : {}), ...(before !== undefined ? { before } : {}) }, now()) };
     },
   }),
 } satisfies Record<OpId, HandlerSpec>;
@@ -451,6 +470,13 @@ export const definition: SdkAppDefinition = {
   migrations: migrationsDir,
   async onStart(ctx) {
     bindDb(ctx.db);
+    // the HMAC key for message digests: created once, kept in the app secrets (sealed under TB_KEK, not in the DB)
+    let key = await ctx.secrets.get(DIGEST_KEY_NAME);
+    if (!key) {
+      key = randomBytes(32).toString("base64");
+      await ctx.secrets.put(DIGEST_KEY_NAME, key);
+    }
+    bindDigestKey(key);
     // rule 0, "never keep secrets": created at start, locked, always first (DESIGN §3.2)
     ensureRuleZero(ctx.db, now());
   },

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { AGENT_A, AGENT_B, ctxFor, migratedDb, OWNER } from "./helpers.ts";
+import { AGENT_A, AGENT_B, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedJob, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 type Out = Record<string, any>;
@@ -25,16 +25,16 @@ beforeEach(async () => {
   db = migratedDb();
   now = Date.UTC(2026, 9, 17, 12, 0, 0);
   setClock(() => now);
-  await definition.onStart?.({ db } as never);
+  await start(db);
 });
 
 describe("status", () => {
   it("returns labels and counts only: the exact object, with text, senders and conversation titles in the database", async () => {
     const s1 = seedSource(db, { id: "src_01J0000000000000000000AAAA", label: "Work mail", kind: "gmail", conversations: ["Secret project: layoffs", "inbox"] });
     const s2 = seedSource(db, { id: "src_01J0000000000000000000BBBB", label: "Team chat", kind: "slack", conversations: ["#ceo-private"], createdAt: Date.UTC(2026, 9, 2) });
-    seedJob(db, s1, { kind: "live", state: "waiting", readCount: 12, retryAt: Date.UTC(2026, 9, 17, 12, 5, 0), lastError: "boom: anna@example.com wrote the password hunter2" });
-    seedJob(db, s1, { kind: "backfill", state: "running", readCount: 300, maxMessages: 1000, createdAt: Date.UTC(2026, 9, 2), sinceAt: Date.UTC(2026, 0, 1) });
-    seedJob(db, s2, { kind: "live", state: "paused" });
+    seedJob(db, s1, { id: "job_live_1", kind: "live", state: "waiting", readCount: 12, retryAt: Date.UTC(2026, 9, 17, 12, 5, 0), lastError: "boom: anna@example.com wrote the password hunter2" });
+    seedJob(db, s1, { id: "job_hist_1", kind: "backfill", state: "running", readCount: 300, maxMessages: 1000, createdAt: Date.UTC(2026, 9, 2), sinceAt: Date.UTC(2026, 0, 1) });
+    seedJob(db, s2, { id: "job_live_2", kind: "live", state: "paused" });
     const rec = seedRecord(db, s1, { state: "review", thread: "Re: salary of Bob" });
     seedRecord(db, s1, { state: "delivered" });
     seedMessage(db, s1, { record: rec, text: "The password is hunter2, call +49 170 1234567", author: "email:anna@example.com", conversation: "Secret project: layoffs", thread: "Re: salary of Bob" });
@@ -46,6 +46,8 @@ describe("status", () => {
           kind: "gmail",
           live: { state: "waiting", lastReadAt: null, nextAt: "2026-10-17T12:05:00.000Z" },
           history: { state: "running", done: 300, total: 1000, since: "2026-01-01T00:00:00.000Z" },
+          liveJobId: "job_live_1",
+          historyJobId: "job_hist_1",
         },
         {
           id: "src_01J0000000000000000000BBBB",
@@ -53,6 +55,8 @@ describe("status", () => {
           kind: "slack",
           live: { state: "paused", lastReadAt: null, nextAt: null },
           history: { state: "none", done: 0, total: null, since: null },
+          liveJobId: "job_live_2",
+          historyJobId: null,
         },
       ],
       review: { waiting: 1 },
@@ -91,14 +95,30 @@ describe("job_pause", () => {
     assert.equal(db.prepare("SELECT paused_by FROM obs_jobs WHERE id = ?").get(id)?.paused_by, AGENT_A.id);
     assert.equal(ctx.statusChanges, 0);
   });
-  it("answers not_found for a missing job and job_state_invalid for a finished one", async () => {
+  it("answers ONE error, not_found 404, for an unknown id and for a job that cannot be paused: no oracle for which jobs exist or end", async () => {
     const src = seedSource(db);
-    await rejects(run("job_pause", { jobId: "job_nope" }, A()), "not_found", 404);
+    const answers: unknown[] = [];
+    const ask = async (jobId: string) => {
+      await assert.rejects(run("job_pause", { jobId }, A()), (e: { code?: string; httpStatus?: number; message?: string }) => {
+        answers.push([e.code, e.httpStatus, e.message]);
+        return true;
+      });
+    };
+    await ask("job_nope");
     for (const state of ["done", "failed", "cancelled"]) {
       const id = seedJob(db, src, { state, kind: "backfill" });
-      await rejects(run("job_pause", { jobId: id }, A()), "job_state_invalid", 409);
+      await ask(id);
       assert.equal(db.prepare("SELECT state FROM obs_jobs WHERE id = ?").get(id)?.state, state, "the job did not change");
     }
+    assert.ok(answers.every((a) => JSON.stringify(a) === JSON.stringify(answers[0])));
+    assert.deepEqual((answers[0] as unknown[]).slice(0, 2), ["not_found", 404]);
+  });
+  it("the job ids status shows are the ones job_pause accepts", async () => {
+    const src = seedSource(db);
+    const id = seedJob(db, src, { kind: "live", state: "running" });
+    const status = await run("status", {}, A());
+    assert.equal(status.sources[0].liveJobId, id);
+    assert.deepEqual(await run("job_pause", { jobId: status.sources[0].liveJobId }, A()), { job: { id, state: "paused" } });
   });
   it("an agent cannot start, resume or cancel: the manifest gives agents job_pause only, and job_control is a person op", async () => {
     const m = (await import("../src/app.ts")).manifest;
@@ -168,18 +188,50 @@ describe("flag", () => {
     const { rec } = delivered();
     await rejects(run("flag", { recordId: rec, reason: "   " }, A()), "reason_empty", 400);
   });
+  function many(n: number): string[] {
+    const src = seedSource(db);
+    return Array.from({ length: n }, (_, i) => {
+      const rec = seedRecord(db, src, { state: "delivered" });
+      seedDelivery(db, rec, { status: "sent", targetRef: `doc_m${i}` });
+      return rec;
+    });
+  }
   it("caps 50 flags per agent per day (flag_limit, 429): the 51st fails, another agent and the next day still work", async () => {
-    const { rec } = delivered();
-    for (let i = 0; i < 50; i++) await run("flag", { recordId: rec, reason: `r${i}` }, A());
-    await rejects(run("flag", { recordId: rec, reason: "one too many" }, A()), "flag_limit", 429);
+    const recs = many(52);
+    for (let i = 0; i < 50; i++) await run("flag", { recordId: recs[i], reason: `r${i}` }, A());
+    await rejects(run("flag", { recordId: recs[50], reason: "one too many" }, A()), "flag_limit", 429);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_flags WHERE by_id = ?").get(AGENT_A.id)?.c, 50);
-    assert.ok(await run("flag", { recordId: rec, reason: "other agent" }, B()), "the cap is per agent");
+    assert.ok(await run("flag", { recordId: recs[50], reason: "other agent" }, B()), "the cap is per agent");
     now += 24 * 3_600_000 + 1;
-    assert.ok(await run("flag", { recordId: rec, reason: "next day" }, A()), "the window moves on");
+    assert.ok(await run("flag", { recordId: recs[51], reason: "next day" }, A()), "the window moves on");
   });
-  it("a capped agent gets flag_limit even for unknown ids (the cap leaks nothing)", async () => {
-    const { rec } = delivered();
-    for (let i = 0; i < 50; i++) await run("flag", { recordId: rec, reason: `r${i}` }, A());
+  it("a capped agent gets flag_limit even for unknown ids (the cap leaks nothing), but still gets its own open flag back", async () => {
+    const recs = many(50);
+    const first = await run("flag", { recordId: recs[0], reason: "r" }, A());
+    for (let i = 1; i < 50; i++) await run("flag", { recordId: recs[i], reason: `r${i}` }, A());
     await rejects(run("flag", { recordId: "rec_01J00000000000000000000000", reason: "x" }, A()), "flag_limit", 429);
+    assert.deepEqual(await run("flag", { recordId: recs[0], reason: "again" }, A()), first, "the repeat of an open flag is not blocked by the cap");
+  });
+  it("flagging again is idempotent: the same flagId, no new row, no cap use; the owner's keep closes the flag and the agent can flag anew", async () => {
+    const { rec } = delivered();
+    const first = await run("flag", { recordId: rec, reason: "wrong" }, A());
+    const again = await run("flag", { documentId: "doc_1", reason: "still wrong" }, A());
+    assert.deepEqual(again, first);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_flags").get()?.c, 1);
+    assert.equal(db.prepare("SELECT reason FROM obs_flags").get()?.reason, "wrong", "the first reason stays");
+    await rejects(run("flag", { recordId: rec, reason: "x" }, B()), "not_found", 404); // already waiting in Review for another agent
+    await handlers.review_decide.run({ recordId: rec, decision: "keep" } as never, ctxFor(db, OWNER));
+    assert.notEqual(db.prepare("SELECT closed_at FROM obs_flags WHERE id = ?").get(first.flagId)?.closed_at, null, "the decision closed the flag");
+    const second = await run("flag", { recordId: rec, reason: "wrong again" }, A());
+    assert.notEqual(second.flagId, first.flagId);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_flags").get()?.c, 2);
+  });
+  it("only a record that is still delivered can be flagged: one waiting in Review, approved or dropped answers not_found", async () => {
+    const { rec } = delivered();
+    for (const state of ["review", "approved", "dropped", "classified"]) {
+      db.prepare("UPDATE obs_records SET state = ? WHERE id = ?").run(state, rec);
+      await rejects(run("flag", { recordId: rec, reason: "x" }, A()), "not_found", 404);
+    }
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_flags").get()?.c, 0);
   });
 });

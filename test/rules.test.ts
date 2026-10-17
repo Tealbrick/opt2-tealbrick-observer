@@ -2,9 +2,9 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
-import { definition, handlers, setClock } from "../src/app.ts";
+import { handlers, setClock } from "../src/app.ts";
 import { MAX_RULES, RULE_ZERO_ID } from "../src/store.ts";
-import { ctxFor, migratedDb, OWNER } from "./helpers.ts";
+import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 
 type Out = Record<string, any>;
 const run = async (opId: keyof typeof handlers, input: unknown, ctx: OpContext): Promise<Out> => (await handlers[opId].run(input as never, ctx)) as Out;
@@ -26,7 +26,7 @@ beforeEach(async () => {
   db = migratedDb();
   now = Date.UTC(2026, 9, 17, 12, 0, 0);
   setClock(() => now);
-  await definition.onStart?.({ db } as never);
+  await start(db);
 });
 
 describe("rule 0", () => {
@@ -34,13 +34,13 @@ describe("rule 0", () => {
     const before = (await run("rules_list", {}, O())).rules;
     assert.deepEqual(before, [{ id: RULE_ZERO_ID, position: 0, locked: true, match: { pii: ["secret"] }, action: { deliver: "drop", redact: false } }]);
     assert.equal(RULE_ZERO_ID, "rul_00000000000000000000000000");
-    await definition.onStart?.({ db } as never);
+    await start(db);
     assert.deepEqual((await run("rules_list", {}, O())).rules, before);
   });
   it("onStart puts back a rule 0 that was edited or moved in the database", async () => {
     await put(1);
     db.prepare("UPDATE obs_rules SET locked = 0, position = 5, action_json = '{\"deliver\":\"knowledge\"}' WHERE id = ?").run(RULE_ZERO_ID);
-    await definition.onStart?.({ db } as never);
+    await start(db);
     const rules = (await run("rules_list", {}, O())).rules;
     assert.deepEqual([rules[0].id, rules[0].locked, rules[0].action.deliver, rules[0].position], [RULE_ZERO_ID, true, "drop", 0]);
     assert.deepEqual(rules.map((r: Out) => r.position), [0, 1]);

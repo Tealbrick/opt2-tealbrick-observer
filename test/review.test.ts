@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { PAGE_SIZE } from "../src/store.ts";
-import { ctxFor, migratedDb, OWNER } from "./helpers.ts";
+import { PAGE_SIZE, RULE_ZERO_ID, routeRecord } from "../src/store.ts";
+import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 type Out = Record<string, any>;
@@ -31,7 +31,7 @@ beforeEach(async () => {
   db = migratedDb();
   now = Date.UTC(2026, 9, 17, 12, 0, 0);
   setClock(() => now);
-  await definition.onStart?.({ db } as never);
+  await start(db);
   src = seedSource(db);
 });
 
@@ -153,17 +153,98 @@ describe("review_decide", () => {
       await rejects(run("review_decide", { recordId: rec, decision: "drop" }, O()), "record_not_waiting", 409);
     }
   });
-  it("a flagged record (back in review, same revision) can be decided again: a failed or pending row is reused, a sent one is already_delivered", async () => {
+  it("one outbox row per (record, revision, destination): deciding again reuses the row whatever its key, a sent row is already_delivered", async () => {
     const rec = seedRecord(db, src, { state: "review" });
-    const dlv = seedDelivery(db, rec, { status: "failed", key: key(rec, 1, "knowledge") });
+    const dlv = seedDelivery(db, rec, { status: "failed", key: "obs_rotated_key_not_the_derived_one" });
     await run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O());
-    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1, "no second row, although the stored key is not the derived one");
     assert.equal(row(db, "SELECT id FROM obs_deliveries WHERE record_id = ?", rec)?.id, dlv);
     db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec);
     db.prepare("UPDATE obs_deliveries SET status = 'sent' WHERE id = ?").run(dlv);
     await rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O()), "already_delivered", 409);
     assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", rec)?.state, "review", "the refused decision changed nothing");
     assert.equal((await run("review_decide", { recordId: rec, decision: "deliver", destination: "kanban" }, O())).record.state, "approved", "another destination is a new delivery");
+  });
+  it("the database refuses a second outbox row for the same (record, revision, destination)", () => {
+    const rec = seedRecord(db, src, { state: "approved" });
+    seedDelivery(db, rec, { destination: "knowledge", status: "pending" });
+    assert.throws(() => seedDelivery(db, rec, { destination: "knowledge", status: "failed" }), /UNIQUE/);
+    assert.ok(seedDelivery(db, rec, { destination: "kanban" }), "another destination is fine");
+    assert.ok(seedDelivery(db, rec, { destination: "knowledge", revision: 2 }), "another revision is fine");
+  });
+  it("a new decision wins over a failed one: deliver → fail → deliver_redacted → retry replays the REDACTED input", async () => {
+    const rec = seedRecord(db, src, { state: "review" });
+    const first = { recordId: rec, decision: "deliver", destination: "knowledge" };
+    const second = { recordId: rec, decision: "deliver_redacted", destination: "knowledge" };
+    await run("review_decide", first, O());
+    const id = String(row(db, "SELECT id FROM obs_deliveries WHERE record_id = ?", rec)?.id);
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', attempts = 3, hold_id = 'hld_1', next_at = 99, first_attempt_at = ?, last_error = 'boom', warning = 'may_duplicate: x' WHERE id = ?").run(now - 1000, id);
+    db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec); // S4 puts a failed record back into Review
+    await run("review_decide", second, O());
+    const d = row(db, "SELECT * FROM obs_deliveries WHERE id = ?", id);
+    assert.deepEqual(
+      [d?.input_json, d?.status, d?.attempts, d?.hold_id, d?.next_at, d?.first_attempt_at, d?.last_error, d?.warning],
+      [JSON.stringify(second), "pending", 0, null, null, null, null, null],
+    );
+    assert.notEqual(d?.idem_key, key(rec, 1, "knowledge"), "an earlier attempt may have reached the destination with the old input: new key");
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', first_attempt_at = ? WHERE id = ?").run(now, id);
+    await run("delivery_retry", { id }, O());
+    assert.equal(row(db, "SELECT input_json AS j FROM obs_deliveries WHERE id = ?", id)?.j, JSON.stringify(second), "the retry sends the redacted decision");
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1);
+  });
+  it("a row that was never attempted keeps its key when the decision changes", async () => {
+    const rec = seedRecord(db, src, { state: "review" });
+    await run("review_decide", { recordId: rec, decision: "deliver", destination: "inbox" }, O());
+    db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec);
+    await run("review_decide", { recordId: rec, decision: "deliver_redacted", destination: "inbox" }, O());
+    assert.equal(row(db, "SELECT idem_key AS k FROM obs_deliveries WHERE record_id = ?", rec)?.k, key(rec, 1, "inbox"));
+  });
+  it("keep: a flagged record goes back to delivered with no new delivery; it needs a record that was delivered, and no destination", async () => {
+    const rec = seedRecord(db, src, { state: "delivered" });
+    seedDelivery(db, rec, { status: "sent", targetRef: "doc_1" });
+    db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec); // flagged
+    await rejects(run("review_decide", { recordId: rec, decision: "keep", destination: "knowledge" }, O()), "destination_invalid", 400);
+    const out = await run("review_decide", { recordId: rec, decision: "keep" }, O());
+    assert.deepEqual([out.record.state, out.record.decidedBy], ["delivered", OWNER.id]);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1);
+    await rejects(run("review_decide", { recordId: rec, decision: "keep" }, O()), "record_not_waiting", 409);
+    const never = seedRecord(db, src, { state: "review" });
+    await rejects(run("review_decide", { recordId: never, decision: "keep" }, O()), "nothing_to_keep", 409);
+    assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", never)?.state, "review");
+  });
+  it("keep on a secret record is refused too (secret_drop_only)", async () => {
+    const rec = seedRecord(db, src, { state: "review", secret: true });
+    seedDelivery(db, rec, { status: "sent" });
+    await rejects(run("review_decide", { recordId: rec, decision: "keep" }, O()), "secret_drop_only", 409);
+  });
+  it("a secret is found by the column OR by a `secret` class in pii_json: only drop works", async () => {
+    const byPii = seedRecord(db, src, { state: "review", pii: { secret: 1, email: 2 } });
+    for (const decision of ["deliver", "deliver_redacted"]) await rejects(run("review_decide", { recordId: byPii, decision, destination: "knowledge" }, O()), "secret_drop_only", 409);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+    const quiet = seedRecord(db, src, { state: "review", pii: { secret: 0, email: 2 } });
+    assert.equal((await run("review_decide", { recordId: quiet, decision: "deliver", destination: "knowledge" }, O())).record.state, "approved", "a zero count is no secret");
+    assert.equal((await run("review_decide", { recordId: byPii, decision: "drop" }, O())).record.state, "dropped");
+  });
+});
+
+describe("the router never lets a rule deliver a secret", () => {
+  const rules = (ids: string[]) => ids.map((id, position) => ({ id, position, locked: id === RULE_ZERO_ID, match: {}, action: { deliver: "knowledge" } }));
+  const catchAll = () => true;
+  it("a secret record is dropped by rule 0 before any rule is looked at (the matcher is not even called)", () => {
+    let calls = 0;
+    const matcher = (_r: unknown, _rec: unknown) => {
+      calls++;
+      return catchAll();
+    };
+    for (const rec of [{ secret: 1, pii_json: "{}" }, { secret: 0, pii_json: '{"secret":2}' }]) {
+      assert.deepEqual(routeRecord(rec, rules([RULE_ZERO_ID, "rul_a"]), matcher), { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" });
+    }
+    assert.equal(calls, 0);
+  });
+  it("quiet on good: a normal record goes to the first matching rule (never rule 0), else to Review", () => {
+    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a", "rul_b"]), (r) => r.id === "rul_b"), { kind: "rule", ruleId: "rul_b" });
+    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a"]), () => false), { kind: "review" });
+    assert.deepEqual(routeRecord({ secret: 0, pii_json: "{}" }, rules([RULE_ZERO_ID, "rul_a"]), catchAll), { kind: "rule", ruleId: "rul_a" });
   });
 });
 
@@ -198,11 +279,29 @@ describe("deliveries_list and delivery_retry", () => {
     assert.match(String(r?.idem_key), /^obs_[0-9a-f]{40}$/);
     assert.notEqual(r?.idem_key, "obs_old");
     assert.equal(r?.first_attempt_at, null);
+    // the warning lives on the row: deliveries_list shows it later, and a quick second retry does not drop it
+    const listed = (await run("deliveries_list", { status: "pending" }, O())).items.find((d: Out) => d.id === id);
+    assert.match(listed.warning, /^may_duplicate/);
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', first_attempt_at = ? WHERE id = ?").run(now, id);
+    assert.match((await run("delivery_retry", { id }, O())).delivery.warning, /^may_duplicate/);
+  });
+  it("a delivery that was never retried late shows no warning", async () => {
+    const rec = seedRecord(db, src, { state: "approved" });
+    seedDelivery(db, rec, { status: "failed", firstAttemptAt: now - 1000 });
+    assert.equal((await run("deliveries_list", {}, O())).items[0].warning, null);
+  });
+  it("a retry of a delivery whose record holds a secret is refused (secret_drop_only), whatever the row says", async () => {
+    for (const rec of [seedRecord(db, src, { state: "approved", secret: true }), seedRecord(db, src, { state: "approved", pii: { secret: 1 } })]) {
+      const id = seedDelivery(db, rec, { status: "failed" });
+      await rejects(run("delivery_retry", { id }, O()), "secret_drop_only", 409);
+      assert.equal(row(db, "SELECT status FROM obs_deliveries WHERE id = ?", id)?.status, "failed");
+    }
   });
   it("only a failed row can be retried (delivery_state_invalid, 409); a missing one is not_found", async () => {
     const rec = seedRecord(db, src, { state: "approved" });
+    const dest = { pending: "knowledge", held: "kanban", sent: "inbox" } as const;
     for (const status of ["pending", "held", "sent"] as const) {
-      const id = seedDelivery(db, rec, { status });
+      const id = seedDelivery(db, rec, { status, destination: dest[status] });
       await rejects(run("delivery_retry", { id }, O()), "delivery_state_invalid", 409);
       assert.equal(row(db, "SELECT status FROM obs_deliveries WHERE id = ?", id)?.status, status);
     }

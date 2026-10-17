@@ -2,6 +2,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
+import { definition } from "../src/app.ts";
 
 export function migratedDb(): Db {
   const raw = new DatabaseSync(":memory:");
@@ -60,4 +61,24 @@ export function ctxFor(db: Db, caller: FakeCaller, opts: { context?: Record<stri
   };
   if (opts.targets) ctx.companionTargets = () => opts.targets;
   return ctx as unknown as OpContext & { statusChanges: number };
+}
+
+/** Fake app secrets (the SDK seals them under TB_KEK; here a Map). */
+export function fakeSecrets(): { get(n: string): Promise<string | null>; put(n: string, v: string): Promise<void>; delete(n: string): Promise<void>; store: Map<string, string> } {
+  const store = new Map<string, string>();
+  return {
+    store,
+    get: async (n) => store.get(n) ?? null,
+    put: async (n, v) => {
+      store.set(n, v);
+    },
+    delete: async (n) => {
+      store.delete(n);
+    },
+  };
+}
+/** Run the app's onStart on a test database (rule 0, digest key). */
+export async function start(db: Db, secrets = fakeSecrets()): Promise<ReturnType<typeof fakeSecrets>> {
+  await definition.onStart?.({ db, secrets } as never);
+  return secrets;
 }

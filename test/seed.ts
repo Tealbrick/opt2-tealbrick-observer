@@ -2,6 +2,7 @@
 // Shared by the unit tests and by conformance.start.ts (fixed ids there, so tealbrick-conformance.json can name them).
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
+import { authorKey } from "../src/store.ts";
 
 /** A valid 26-character ULID body that ends in `tag` (Crockford: no I, L, O, U). */
 export const fixedId = (prefix: string, tag: string): string => `${prefix}_01J${"0".repeat(23 - tag.length)}${tag}`;
@@ -65,9 +66,9 @@ export interface MessageSeed {
 export function seedMessage(db: Db, source: string, m: MessageSeed = {}): string {
   const id = m.id ?? `m_${ulid()}`;
   db.prepare(
-    `INSERT INTO obs_messages (source_id, conversation, provider_msg_id, thread, sent_at, deleted, author_ref, author_kind, text, text_digest, record_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(source, m.conversation ?? "inbox", id, m.thread ?? null, m.sentAt ?? Date.UTC(2026, 9, 2), m.deleted ? 1 : 0, m.author ?? "email:anna@example.com", m.authorKind ?? "person", m.text === undefined ? "hello there" : m.text, `sha256:${id}`, m.record ?? null);
+    `INSERT INTO obs_messages (source_id, conversation, provider_msg_id, thread, sent_at, deleted, author_ref, author_key, author_kind, text, text_digest, record_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(source, m.conversation ?? "inbox", id, m.thread ?? null, m.sentAt ?? Date.UTC(2026, 9, 2), m.deleted ? 1 : 0, m.author ?? "email:anna@example.com", authorKey(m.author ?? "email:anna@example.com"), m.authorKind ?? "person", m.text === undefined ? "hello there" : m.text, `sha256:${id}`, m.record ?? null);
   return id;
 }
 

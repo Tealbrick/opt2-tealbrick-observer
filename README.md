@@ -65,3 +65,9 @@ image name in `tealbrick-ci.json` (`opt2-tealbrick-observer`).
 ## Dependency pins and caching
 - `pnpm-lock.yaml` carries the sha512 integrity of every GitHub-release tarball (CI rule ci-v8). After changing an `@opt2-tealbrick/*` dependency run `pnpm install`, then `node <opt2-tealbrick-platform>/ci/tb-ci.ts pin-tarballs .`, then `pnpm install --frozen-lockfile`, and commit the lockfile. Image builds run `pnpm install --frozen-lockfile --ignore-scripts`.
 - `pnpm build` writes the UI to `dist/ui/index.html` + `dist/ui/assets-<content hash>/`; the SDK serves index.html `no-cache` and the hashed directory immutable, so a deploy is visible at once (C61).
+
+## Data rules worth knowing
+- Removing a source (`source_remove`) deletes everything Observer stored for it: messages and their ids, records, the outbox ledger, flags and jobs. Documents already delivered to Knowledge stay there (the owner deletes them in Knowledge). The privacy setting `onSourceDelete` is a different thing: it says what Observer does when the PROVIDER deletes a message (DESIGN §5.5), and `source_remove` does not read it.
+- Narrowing a source (fewer conversations, new excluded senders or domains) and `purge` delete in one transaction: the stored messages or their text, the unsent deliveries of the records they belonged to, records left with no message, and the stored input of sent deliveries. No text of an excluded sender stays in any table. Exclusions compare in JavaScript (`obs_messages.author_key`, NFC + `toLowerCase`), because SQLite `lower()` folds ASCII only.
+- A secret record can only be dropped: `review_decide` and `delivery_retry` refuse everything else (`secret_drop_only`), and the router (`routeRecord`) drops a secret before it looks at any rule.
+- Message digests are HMAC-SHA256 under the app secret `obs_digest_key`, created once at start.

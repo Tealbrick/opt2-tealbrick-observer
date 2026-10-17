@@ -8,9 +8,9 @@ description: What you can and cannot do with Observer, which files the owner's c
 
 ## What you can do
 
-- Call `observer__status` to see what Observer watches: for each source its label, kind, whether it is reading live, how far its history read got, and how many records wait for the owner. It returns labels and counts only.
-- Call `observer__job_pause` with a `jobId` when a job reads too much or something looks wrong. It pauses the job. It is safe to repeat.
-- Call `observer__flag` with a `recordId` (or the Knowledge `documentId`) and a short `reason` when a document Observer delivered is wrong or should not exist. The record goes back to the owner's Review. Always send an idempotency key. You can flag at most 50 times a day.
+- Call `observer__status` to see what Observer watches: for each source its label, kind, whether it is reading live, how far its history read got, the ids of its live and history jobs (`liveJobId`, `historyJobId`), and how many records wait for the owner. It returns labels, ids and counts only.
+- Call `observer__job_pause` with a `jobId` from `status` when a job reads too much or something looks wrong. It pauses the job. It is safe to repeat. A job that already ended, or an id Observer does not know, answers `not_found`.
+- Call `observer__flag` with a `recordId` (or the Knowledge `documentId`) and a short `reason` when a document Observer delivered is wrong or should not exist. The record goes back to the owner's Review, where they decide to keep, replace or drop it. Flagging the same record again while your flag is open returns the same `flagId`. Always send an idempotency key. You can flag at most 50 times a day.
 
 ## What you cannot do
 

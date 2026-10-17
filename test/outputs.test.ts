@@ -5,9 +5,9 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, it } from "node:test";
 import { validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
-import { definition, handlers, manifest, setClock } from "../src/app.ts";
+import { handlers, manifest, setClock } from "../src/app.ts";
 import { setConnectFactory } from "../src/connect.ts";
-import { AGENT_A, ctxFor, migratedDb, OWNER } from "./helpers.ts";
+import { AGENT_A, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { CONFORMANCE, seedConformance, seedDelivery, seedJob, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 let db: Db;
@@ -32,7 +32,7 @@ beforeEach(async () => {
   db = migratedDb();
   setClock(() => Date.UTC(2026, 9, 17, 12, 0, 0));
   setConnectFactory(null);
-  await definition.onStart?.({ db } as never);
+  await start(db);
 });
 
 describe("answers match the manifest schemas", () => {
@@ -73,6 +73,9 @@ describe("answers match the manifest schemas", () => {
     await call("privacy_get", {});
     await call("privacy_set", { textRetentionDays: 10 });
     await call("review_decide", { recordId: rec, decision: "deliver_redacted", destination: "kanban" });
+    const flagged = seedRecord(db, src, { state: "review" });
+    seedDelivery(db, flagged, { status: "sent", targetRef: "doc_k" });
+    await call("review_decide", { recordId: flagged, decision: "keep" });
     await call("purge", { before: "2026-12-01T00:00:00Z" });
     await call("rule_delete", { id: rule.id });
     await call("source_remove", { id: src });
