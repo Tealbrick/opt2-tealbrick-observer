@@ -135,7 +135,7 @@ describe("job_pause", () => {
 describe("flag", () => {
   function delivered(extra: { targetRef?: string } = {}): { rec: string; src: string } {
     const src = seedSource(db);
-    const rec = seedRecord(db, src, { state: "delivered" });
+    const rec = seedRecord(db, src, { state: "delivered", withText: true });
     seedDelivery(db, rec, { status: "sent", targetRef: extra.targetRef ?? "doc_1" });
     return { rec, src };
   }

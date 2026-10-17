@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { PAGE_SIZE, RULE_ZERO_ID, routeRecord } from "../src/store.ts";
-import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
+import { decideRecord, PAGE_SIZE, RULE_ZERO_ID, routeRecord } from "../src/store.ts";
+import { AGENT_A, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 type Out = Record<string, any>;
@@ -101,8 +101,8 @@ describe("review_decide", () => {
   const key = (rec: string, rev: number, dest: string) => `obs_${createHash("sha256").update(JSON.stringify([rec, rev, dest])).digest("hex").slice(0, 40)}`;
 
   it("deliver and deliver_redacted approve the record and write ONE pending outbox row with the key and the exact decide input", async () => {
-    const r1 = seedRecord(db, src, { state: "review", revision: 3 });
-    const r2 = seedRecord(db, src, { state: "review" });
+    const r1 = seedRecord(db, src, { state: "review", withText: true, revision: 3 });
+    const r2 = seedRecord(db, src, { state: "review", withText: true });
     const in1 = { recordId: r1, decision: "deliver", destination: "knowledge" };
     const in2 = { recordId: r2, decision: "deliver_redacted", destination: "inbox" };
     const out = await run("review_decide", in1, O());
@@ -122,16 +122,16 @@ describe("review_decide", () => {
   });
   it("drop ends the record, writes no delivery, and sets the text purge time from the retention setting", async () => {
     await run("privacy_set", { textRetentionDays: 7 }, O());
-    const rec = seedRecord(db, src, { state: "review" });
+    const rec = seedRecord(db, src, { state: "review", withText: true });
     const out = await run("review_decide", { recordId: rec, decision: "drop" }, O());
     assert.deepEqual([out.record.state, out.record.textPurgeAt], ["dropped", new Date(now + 7 * DAY).toISOString()]);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
-    const rec2 = seedRecord(db, src, { state: "review" });
+    const rec2 = seedRecord(db, src, { state: "review", withText: true });
     await run("review_decide", { recordId: rec2, decision: "drop", destination: "drop" }, O());
     assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", rec2)?.state, "dropped");
   });
   it("a record with a secret can only be dropped (secret_drop_only, 409): deliver and deliver_redacted fail, nothing is written, drop works", async () => {
-    const rec = seedRecord(db, src, { state: "review", secret: true });
+    const rec = seedRecord(db, src, { state: "review", withText: true, secret: true });
     for (const decision of ["deliver", "deliver_redacted"]) {
       await rejects(run("review_decide", { recordId: rec, decision, destination: "knowledge" }, O()), "secret_drop_only", 409);
     }
@@ -140,7 +140,7 @@ describe("review_decide", () => {
     assert.equal((await run("review_decide", { recordId: rec, decision: "drop" }, O())).record.state, "dropped");
   });
   it("needs a real destination to deliver and no other destination to drop (destination_required / destination_invalid, 400)", async () => {
-    const rec = seedRecord(db, src, { state: "review" });
+    const rec = seedRecord(db, src, { state: "review", withText: true });
     await rejects(run("review_decide", { recordId: rec, decision: "deliver" }, O()), "destination_required", 400);
     await rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "drop" }, O()), "destination_invalid", 400);
     await rejects(run("review_decide", { recordId: rec, decision: "drop", destination: "knowledge" }, O()), "destination_invalid", 400);
@@ -154,7 +154,7 @@ describe("review_decide", () => {
     }
   });
   it("one outbox row per (record, revision, destination): deciding again reuses the row whatever its key, a sent row is already_delivered", async () => {
-    const rec = seedRecord(db, src, { state: "review" });
+    const rec = seedRecord(db, src, { state: "review", withText: true });
     const dlv = seedDelivery(db, rec, { status: "failed", key: "obs_rotated_key_not_the_derived_one" });
     await run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O());
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1, "no second row, although the stored key is not the derived one");
@@ -173,7 +173,7 @@ describe("review_decide", () => {
     assert.ok(seedDelivery(db, rec, { destination: "knowledge", revision: 2 }), "another revision is fine");
   });
   it("a new decision wins over a failed one: deliver → fail → deliver_redacted → retry replays the REDACTED input", async () => {
-    const rec = seedRecord(db, src, { state: "review" });
+    const rec = seedRecord(db, src, { state: "review", withText: true });
     const first = { recordId: rec, decision: "deliver", destination: "knowledge" };
     const second = { recordId: rec, decision: "deliver_redacted", destination: "knowledge" };
     await run("review_decide", first, O());
@@ -184,8 +184,9 @@ describe("review_decide", () => {
     const d = row(db, "SELECT * FROM obs_deliveries WHERE id = ?", id);
     assert.deepEqual(
       [d?.input_json, d?.status, d?.attempts, d?.hold_id, d?.next_at, d?.first_attempt_at, d?.last_error, d?.warning],
-      [JSON.stringify(second), "pending", 0, null, null, null, null, null],
+      [JSON.stringify(second), "pending", 0, null, null, null, null, d?.warning],
     );
+    assert.match(String(d?.warning), /^may_duplicate/, "an attempt was made before, so the destination may hold a copy");
     assert.notEqual(d?.idem_key, key(rec, 1, "knowledge"), "an earlier attempt may have reached the destination with the old input: new key");
     db.prepare("UPDATE obs_deliveries SET status = 'failed', first_attempt_at = ? WHERE id = ?").run(now, id);
     await run("delivery_retry", { id }, O());
@@ -193,14 +194,15 @@ describe("review_decide", () => {
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1);
   });
   it("a row that was never attempted keeps its key when the decision changes", async () => {
-    const rec = seedRecord(db, src, { state: "review" });
+    const rec = seedRecord(db, src, { state: "review", withText: true });
     await run("review_decide", { recordId: rec, decision: "deliver", destination: "inbox" }, O());
     db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec);
     await run("review_decide", { recordId: rec, decision: "deliver_redacted", destination: "inbox" }, O());
     assert.equal(row(db, "SELECT idem_key AS k FROM obs_deliveries WHERE record_id = ?", rec)?.k, key(rec, 1, "inbox"));
+    assert.equal(row(db, "SELECT warning AS w FROM obs_deliveries WHERE record_id = ?", rec)?.w, null, "no attempt, no warning");
   });
   it("keep: a flagged record goes back to delivered with no new delivery; it needs a record that was delivered, and no destination", async () => {
-    const rec = seedRecord(db, src, { state: "delivered" });
+    const rec = seedRecord(db, src, { state: "delivered", withText: true });
     seedDelivery(db, rec, { status: "sent", targetRef: "doc_1" });
     db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec); // flagged
     await rejects(run("review_decide", { recordId: rec, decision: "keep", destination: "knowledge" }, O()), "destination_invalid", 400);
@@ -208,22 +210,203 @@ describe("review_decide", () => {
     assert.deepEqual([out.record.state, out.record.decidedBy], ["delivered", OWNER.id]);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1);
     await rejects(run("review_decide", { recordId: rec, decision: "keep" }, O()), "record_not_waiting", 409);
-    const never = seedRecord(db, src, { state: "review" });
+    const never = seedRecord(db, src, { state: "review", withText: true });
     await rejects(run("review_decide", { recordId: never, decision: "keep" }, O()), "nothing_to_keep", 409);
     assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", never)?.state, "review");
   });
   it("keep on a secret record is refused too (secret_drop_only)", async () => {
-    const rec = seedRecord(db, src, { state: "review", secret: true });
+    const rec = seedRecord(db, src, { state: "review", withText: true, secret: true });
     seedDelivery(db, rec, { status: "sent" });
     await rejects(run("review_decide", { recordId: rec, decision: "keep" }, O()), "secret_drop_only", 409);
   });
   it("a secret is found by the column OR by a `secret` class in pii_json: only drop works", async () => {
-    const byPii = seedRecord(db, src, { state: "review", pii: { secret: 1, email: 2 } });
+    const byPii = seedRecord(db, src, { state: "review", withText: true, pii: { secret: 1, email: 2 } });
     for (const decision of ["deliver", "deliver_redacted"]) await rejects(run("review_decide", { recordId: byPii, decision, destination: "knowledge" }, O()), "secret_drop_only", 409);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
-    const quiet = seedRecord(db, src, { state: "review", pii: { secret: 0, email: 2 } });
+    const quiet = seedRecord(db, src, { state: "review", withText: true, pii: { secret: 0, email: 2 } });
     assert.equal((await run("review_decide", { recordId: quiet, decision: "deliver", destination: "knowledge" }, O())).record.state, "approved", "a zero count is no secret");
     assert.equal((await run("review_decide", { recordId: byPii, decision: "drop" }, O())).record.state, "dropped");
+  });
+});
+
+describe("superseded deliveries stay dead", () => {
+  const rows = (rec: string) => db.prepare("SELECT destination, status, revision FROM obs_deliveries WHERE record_id = ? ORDER BY destination, revision").all(rec).map((r) => ({ ...r }));
+  const decide = (input: Record<string, unknown>) => run("review_decide", input, O());
+  const backToReview = (rec: string) => db.prepare("UPDATE obs_records SET state = 'review' WHERE id = ?").run(rec);
+
+  it("repro 1: deliver_redacted to ANOTHER destination deletes the old failed row; a copy of it cannot be retried", async () => {
+    const rec = seedRecord(db, src, { state: "review", withText: true });
+    await decide({ recordId: rec, decision: "deliver", destination: "knowledge" });
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', first_attempt_at = ? WHERE record_id = ?").run(now, rec);
+    backToReview(rec);
+    await decide({ recordId: rec, decision: "deliver_redacted", destination: "kanban" });
+    assert.deepEqual(rows(rec), [{ destination: "kanban", status: "pending", revision: 1 }]);
+    const revived = seedDelivery(db, rec, { destination: "knowledge", status: "failed" });
+    await rejects(run("delivery_retry", { id: revived }, O()), "delivery_state_invalid", 409);
+    assert.equal(row(db, "SELECT status FROM obs_deliveries WHERE id = ?", revived)?.status, "failed", "nothing changed");
+    // the row of the last decision can be retried
+    db.prepare("UPDATE obs_deliveries SET status = 'failed' WHERE record_id = ? AND destination = 'kanban'").run(rec);
+    const kanban = String(row(db, "SELECT id FROM obs_deliveries WHERE record_id = ? AND destination = 'kanban'", rec)?.id);
+    assert.equal((await run("delivery_retry", { id: kanban }, O())).delivery.status, "pending");
+  });
+  it("repro 2: drop deletes every unsent row; a failed row that is put back cannot be retried (the record is dropped)", async () => {
+    const rec = seedRecord(db, src, { state: "review", withText: true });
+    await decide({ recordId: rec, decision: "deliver", destination: "inbox" });
+    db.prepare("UPDATE obs_deliveries SET status = 'failed' WHERE record_id = ?").run(rec);
+    backToReview(rec);
+    await decide({ recordId: rec, decision: "drop" });
+    assert.deepEqual(rows(rec), []);
+    const revived = seedDelivery(db, rec, { destination: "inbox", status: "failed" });
+    await rejects(run("delivery_retry", { id: revived }, O()), "delivery_state_invalid", 409);
+  });
+  it("keep deletes unsent rows too and leaves the sent one", async () => {
+    const rec = seedRecord(db, src, { state: "review", withText: true });
+    seedDelivery(db, rec, { destination: "knowledge", status: "sent", targetRef: "doc" });
+    seedDelivery(db, rec, { destination: "kanban", status: "failed" });
+    await decide({ recordId: rec, decision: "keep" });
+    assert.deepEqual(rows(rec), [{ destination: "knowledge", status: "sent", revision: 1 }]);
+  });
+  it("a retry needs: record approved, same revision, same decided destination; each missing piece answers delivery_state_invalid (409)", async () => {
+    const make = () => {
+      const rec = seedRecord(db, src, { state: "approved", destination: "knowledge" });
+      return { rec, id: seedDelivery(db, rec, { destination: "knowledge", status: "failed" }) };
+    };
+    const ok = make();
+    assert.equal((await run("delivery_retry", { id: ok.id }, O())).delivery.status, "pending");
+    const bad: [string, (m: { rec: string }) => void][] = [
+      ["record in review", (m) => backToReview(m.rec)],
+      ["record dropped", (m) => db.prepare("UPDATE obs_records SET state = 'dropped' WHERE id = ?").run(m.rec)],
+      ["record delivered", (m) => db.prepare("UPDATE obs_records SET state = 'delivered' WHERE id = ?").run(m.rec)],
+      ["other revision", (m) => db.prepare("UPDATE obs_records SET revision = 2 WHERE id = ?").run(m.rec)],
+      ["other destination", (m) => db.prepare("UPDATE obs_records SET decided_destination = 'kanban' WHERE id = ?").run(m.rec)],
+      ["no destination", (m) => db.prepare("UPDATE obs_records SET decided_destination = NULL WHERE id = ?").run(m.rec)],
+    ];
+    for (const [name, mutate] of bad) {
+      const m = make();
+      mutate(m);
+      await rejects(run("delivery_retry", { id: m.id }, O()), "delivery_state_invalid", 409);
+      assert.equal(row(db, "SELECT status FROM obs_deliveries WHERE id = ?", m.id)?.status, "failed", name);
+    }
+  });
+});
+
+describe("a flag lets the owner replace the delivered document", () => {
+  it("flag raises the revision, so deliver and deliver_redacted to the SAME destination make a new row; the old sent row stays", async () => {
+    const rec = seedRecord(db, src, { state: "delivered", withText: true });
+    seedDelivery(db, rec, { destination: "knowledge", status: "sent", targetRef: "doc_old" });
+    await handlers.flag.run({ recordId: rec, reason: "contains a phone number" } as never, ctxFor(db, AGENT_A));
+    assert.deepEqual({ ...row(db, "SELECT state, revision FROM obs_records WHERE id = ?", rec) }, { state: "review", revision: 2 });
+    const out = await run("review_decide", { recordId: rec, decision: "deliver_redacted", destination: "knowledge" }, O());
+    assert.equal(out.record.state, "approved");
+    assert.deepEqual(
+      db.prepare("SELECT revision, status, target_ref FROM obs_deliveries WHERE record_id = ? ORDER BY revision").all(rec).map((r) => ({ ...r })),
+      [
+        { revision: 1, status: "sent", target_ref: "doc_old" },
+        { revision: 2, status: "pending", target_ref: null },
+      ],
+    );
+    assert.notEqual(
+      row(db, "SELECT idem_key AS k FROM obs_deliveries WHERE revision = 2")?.k,
+      row(db, "SELECT idem_key AS k FROM obs_deliveries WHERE revision = 1")?.k,
+      "a new revision is a new key",
+    );
+  });
+  it("keep after a flag still works (any sent row of the record counts)", async () => {
+    const rec = seedRecord(db, src, { state: "delivered", withText: true });
+    seedDelivery(db, rec, { status: "sent", targetRef: "doc" });
+    await handlers.flag.run({ recordId: rec, reason: "x" } as never, ctxFor(db, AGENT_A));
+    assert.equal((await run("review_decide", { recordId: rec, decision: "keep" }, O())).record.state, "delivered");
+  });
+});
+
+describe("text_gone: nothing to deliver without text", () => {
+  const delivered = (rec: string) => seedDelivery(db, rec, { status: "sent", targetRef: "doc" });
+  it("deliver, deliver_redacted and keep answer text_gone (409) when no message has text; drop still works", async () => {
+    const rec = seedRecord(db, src, { state: "review" });
+    seedMessage(db, src, { record: rec, id: "purged", text: null });
+    seedMessage(db, src, { record: rec, id: "gone", text: "deleted at the source", deleted: true });
+    delivered(rec);
+    for (const input of [
+      { decision: "deliver", destination: "knowledge" },
+      { decision: "deliver_redacted", destination: "kanban" },
+      { decision: "keep" },
+    ]) {
+      await rejects(run("review_decide", { recordId: rec, ...input }, O()), "text_gone", 409);
+    }
+    assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", rec)?.state, "review");
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 1, "nothing written");
+    assert.equal((await run("review_decide", { recordId: rec, decision: "drop" }, O())).record.state, "dropped");
+  });
+  it("a record with no message at all is text_gone as well", async () => {
+    const rec = seedRecord(db, src, { state: "review" });
+    await rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O()), "text_gone", 409);
+  });
+  it("text_purge_at in the past is text_gone even if the text is still stored; one message with text is enough while inside", async () => {
+    const rec = seedRecord(db, src, { state: "review", textPurgeAt: now + 1000 });
+    seedMessage(db, src, { record: rec, id: "m1", text: "still here" });
+    seedMessage(db, src, { record: rec, id: "m2", text: null });
+    now += 1000;
+    await rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O()), "text_gone", 409);
+    db.prepare("UPDATE obs_records SET text_purge_at = ? WHERE id = ?").run(now + 1, rec);
+    assert.equal((await run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O())).record.state, "approved");
+  });
+});
+
+describe("a held delivery blocks every decision (delivery_held)", () => {
+  it("deliver (same or another destination), deliver_redacted, drop and keep are refused and change nothing; a released row lets the owner go on", async () => {
+    const rec = seedRecord(db, src, { state: "review", withText: true });
+    seedDelivery(db, rec, { destination: "knowledge", status: "sent", targetRef: "doc" });
+    const held = seedDelivery(db, rec, { destination: "kanban", status: "held" });
+    db.prepare("UPDATE obs_deliveries SET hold_id = 'hld_1' WHERE id = ?").run(held);
+    for (const input of [
+      { decision: "deliver", destination: "kanban" },
+      { decision: "deliver", destination: "inbox" },
+      { decision: "deliver_redacted", destination: "kanban" },
+      { decision: "drop" },
+      { decision: "keep" },
+    ]) {
+      await rejects(run("review_decide", { recordId: rec, ...input }, O()), "delivery_held", 409);
+    }
+    assert.deepEqual({ ...row(db, "SELECT status, hold_id FROM obs_deliveries WHERE id = ?", held) }, { status: "held", hold_id: "hld_1" });
+    assert.equal(row(db, "SELECT state FROM obs_records WHERE id = ?", rec)?.state, "review");
+    db.prepare("UPDATE obs_deliveries SET status = 'failed', hold_id = NULL WHERE id = ?").run(held);
+    assert.equal((await run("review_decide", { recordId: rec, decision: "drop" }, O())).record.state, "dropped");
+  });
+});
+
+describe("the guards live in decideRecord itself", () => {
+  const call = (r: Record<string, unknown>, decision: "deliver" | "drop", destination?: string) => decideRecord(db, r, { decision, destination, input: {} }, OWNER.id, now, 30);
+  it("a secret record is refused by decideRecord for anything but drop, called directly, with the column or the pii class", () => {
+    for (const rec of [seedRecord(db, src, { state: "review", secret: true, withText: true }), seedRecord(db, src, { state: "review", pii: { secret: 3 }, withText: true })]) {
+      const r = { ...(db.prepare("SELECT * FROM obs_records WHERE id = ?").get(rec) as Record<string, unknown>) };
+      assert.throws(() => call(r, "deliver", "knowledge"), { code: "secret_drop_only" });
+      assert.doesNotThrow(() => call(r, "drop"));
+    }
+  });
+  it("fails closed: a pii_json that cannot be read counts as a secret (decide, retry), also '[]', 'null' and a non-number", async () => {
+    for (const bad of ["{not json", "[]", "null", '"x"', '{"secret":"yes"}']) {
+      const rec = seedRecord(db, src, { state: "review", withText: true });
+      db.prepare("UPDATE obs_records SET pii_json = ? WHERE id = ?").run(bad, rec);
+      await rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O()), "secret_drop_only", 409);
+      assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries WHERE record_id = ?").get(rec)?.c, 0, bad);
+      const failedRow = seedRecord(db, src, { state: "approved", destination: "knowledge" });
+      const id = seedDelivery(db, failedRow, { status: "failed" });
+      db.prepare("UPDATE obs_records SET pii_json = ? WHERE id = ?").run(bad, failedRow);
+      await rejects(run("delivery_retry", { id }, O()), "secret_drop_only", 409);
+      assert.equal((await run("review_decide", { recordId: rec, decision: "drop" }, O())).record.state, "dropped", "drop still works");
+    }
+  });
+  it("quiet on good: pii counts that are not secret (a zero, other classes) are fine", async () => {
+    for (const pii of ['{"email":2}', '{"secret":0,"phone":1}', "{}"]) {
+      const rec = seedRecord(db, src, { state: "review", withText: true });
+      db.prepare("UPDATE obs_records SET pii_json = ? WHERE id = ?").run(pii, rec);
+      assert.equal((await run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge" }, O())).record.state, "approved", pii);
+    }
+  });
+  it("the state guard too: decideRecord on a record that is not in review throws record_not_waiting", () => {
+    const rec = seedRecord(db, src, { state: "delivered", withText: true });
+    const r = { ...(db.prepare("SELECT * FROM obs_records WHERE id = ?").get(rec) as Record<string, unknown>) };
+    assert.throws(() => call(r, "drop"), { code: "record_not_waiting" });
   });
 });
 

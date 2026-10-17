@@ -2,8 +2,9 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
-import { handlers, setClock } from "../src/app.ts";
-import { digestOf, textDigest } from "../src/store.ts";
+import { definition, handlers, setClock } from "../src/app.ts";
+import { digestAttention, digestOf, digestState } from "../src/digest.ts";
+import { textDigest } from "../src/store.ts";
 import { ctxFor, fakeSecrets, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
@@ -115,17 +116,89 @@ describe("purge", () => {
 });
 
 describe("message digests", () => {
-  it("onStart creates the HMAC key once in the app secrets and reuses it on every start", async () => {
+  const logs: string[] = [];
+  const log = { debug() {}, info() {}, warn() {}, error: (m: string) => void logs.push(m) };
+  const boot = async (secrets: unknown, withLog = true) => {
+    logs.length = 0;
+    await definition.onStart?.({ db, secrets, ...(withLog ? { log } : {}) } as never);
+  };
+  // a database that has never started (the outer beforeEach already ran onStart on the shared one)
+  beforeEach(() => {
+    db = migratedDb();
+  });
+  const rule0 = () => db.prepare("SELECT id FROM obs_rules WHERE id = ?").get("rul_00000000000000000000000000");
+
+  it("onStart creates the HMAC key once in the app secrets, records that in obs_settings, and reuses it on every start", async () => {
     const secrets = fakeSecrets();
-    assert.equal(secrets.store.size, 0);
-    await start(db, secrets);
+    await boot(secrets);
     const key = secrets.store.get("obs_digest_key");
     assert.ok(key && Buffer.from(key, "base64").length === 32);
+    assert.equal(digestState(), "ok");
+    assert.ok(db.prepare("SELECT value FROM obs_settings WHERE key = 'digest_key_created'").get());
     const digest = digestOf("hello");
-    await start(db, secrets);
+    await boot(secrets);
     assert.equal(secrets.store.get("obs_digest_key"), key, "not made again");
     assert.equal(digestOf("hello"), digest);
     assert.equal(secrets.store.size, 1);
+    assert.equal(await definition.attention?.(db), null);
+    assert.deepEqual(logs, []);
+  });
+  it("a key that exists without the setting (an install from before) is kept and the setting is recorded", async () => {
+    const secrets = fakeSecrets();
+    secrets.store.set("obs_digest_key", "existing-key");
+    await boot(secrets);
+    assert.equal(digestState(), "ok");
+    assert.ok(db.prepare("SELECT value FROM obs_settings WHERE key = 'digest_key_created'").get());
+    assert.equal(secrets.store.get("obs_digest_key"), "existing-key");
+  });
+  it("ctx.secrets undefined: rule 0 still exists, the error is logged, attention digest_key_unavailable, digestOf throws", async () => {
+    db.exec("DELETE FROM obs_rules");
+    await boot(undefined);
+    assert.ok(rule0(), "rule 0 is made BEFORE the digest step");
+    assert.equal(digestState(), "unavailable");
+    assert.deepEqual(logs, ["the digest key is unavailable"]);
+    assert.equal((await definition.attention?.(db))?.code, "digest_key_unavailable");
+    assert.throws(() => digestOf("x"), { code: "digest_key_unavailable" });
+  });
+  it("a secret store that throws is the same: rule 0 exists, the app starts, attention is shown", async () => {
+    db.exec("DELETE FROM obs_rules");
+    const broken = { get: async () => Promise.reject(new Error("kek wrong")), put: async () => {} };
+    await boot(broken);
+    assert.ok(rule0());
+    assert.equal((await definition.attention?.(db))?.code, "digest_key_unavailable");
+    assert.ok(!db.prepare("SELECT 1 FROM obs_settings WHERE key = 'digest_key_created'").get(), "no key was made, so nothing is recorded");
+  });
+  it("a failed put makes no setting and no key (the next start tries again)", async () => {
+    const secrets = { get: async () => null, put: async () => Promise.reject(new Error("disk full")) };
+    await boot(secrets);
+    assert.equal(digestState(), "unavailable");
+    assert.ok(!db.prepare("SELECT 1 FROM obs_settings WHERE key = 'digest_key_created'").get());
+    const good = fakeSecrets();
+    await boot(good);
+    assert.equal(digestState(), "ok", "recovers at the next start");
+    assert.equal(await definition.attention?.(db), null);
+  });
+  it("key lost (the setting says one was made, the store has none): NO new key, attention digest_key_lost, digestOf throws, the app runs on", async () => {
+    const secrets = fakeSecrets();
+    await boot(secrets); // makes the key and the setting
+    const gone = fakeSecrets(); // restored under another KEK: the store is empty
+    await boot(gone);
+    assert.equal(gone.store.size, 0, "no new key was created");
+    assert.equal(digestState(), "lost");
+    assert.equal((await definition.attention?.(db))?.code, "digest_key_lost");
+    assert.deepEqual(digestAttention()?.code, "digest_key_lost");
+    assert.throws(() => digestOf("hello"), { code: "digest_key_lost" });
+    assert.ok(rule0());
+    assert.equal(logs.length, 1);
+    // the owner restores the secret: the next start is fine again
+    gone.store.set("obs_digest_key", secrets.store.get("obs_digest_key") as string);
+    await boot(gone);
+    assert.equal(digestState(), "ok");
+    assert.equal(await definition.attention?.(db), null);
+  });
+  it("before onStart ran there is no key and digestOf throws (never an unkeyed hash)", async () => {
+    await boot(undefined);
+    assert.throws(() => digestOf("x"), (e: { code?: string }) => e.code?.startsWith("digest_key"));
   });
   it("the digest is an HMAC: stable for the same text and key, different for another text or another key, never a plain sha256", () => {
     assert.match(textDigest("k1", "hello"), /^hmac-sha256:[0-9a-f]{64}$/);

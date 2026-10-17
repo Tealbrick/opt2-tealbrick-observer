@@ -47,9 +47,9 @@ describe("answers match the manifest schemas", () => {
     const src = seedSource(db);
     const live = seedJob(db, src, { kind: "live", state: "paused" });
     const hist = seedJob(db, src, { kind: "backfill", state: "failed", lastError: "rate_limited", retryAt: Date.UTC(2026, 9, 17, 13), sinceAt: Date.UTC(2026, 0, 1), maxMessages: 500, readCount: 20, createdAt: Date.UTC(2026, 9, 2) });
-    const rec = seedRecord(db, src, { state: "review", pii: { email: 1 } });
+    const rec = seedRecord(db, src, { state: "review", pii: { email: 1 }, withText: true });
     seedMessage(db, src, { record: rec });
-    const sent = seedRecord(db, src, { state: "delivered" });
+    const sent = seedRecord(db, src, { state: "approved" });
     const dlv = seedDelivery(db, sent, { status: "failed" });
     await call("status", {}, agent());
     await call("sources_available", {});
@@ -73,7 +73,7 @@ describe("answers match the manifest schemas", () => {
     await call("privacy_get", {});
     await call("privacy_set", { textRetentionDays: 10 });
     await call("review_decide", { recordId: rec, decision: "deliver_redacted", destination: "kanban" });
-    const flagged = seedRecord(db, src, { state: "review" });
+    const flagged = seedRecord(db, src, { state: "review", withText: true });
     seedDelivery(db, flagged, { status: "sent", targetRef: "doc_k" });
     await call("review_decide", { recordId: flagged, decision: "keep" });
     await call("purge", { before: "2026-12-01T00:00:00Z" });

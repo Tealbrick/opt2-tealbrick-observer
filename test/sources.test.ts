@@ -267,6 +267,48 @@ describe("source_update", () => {
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages").get()?.c, 1);
     assert.deepEqual((await run("source_update", { id: src, conversations: ["inbox"] }, O())).source.conversations, ["inbox"], "a non-empty list works");
   });
+  it("a FULL new exclude (both lists) replaces a damaged exclude_json; a partial one does not (it needs the stored one)", async () => {
+    for (const bad of ["{not json", "[]", '{"senders":"anna","domains":[]}', '{"senders":[]}']) {
+      const src = seedSource(db);
+      db.prepare("UPDATE obs_sources SET exclude_json = ? WHERE id = ?").run(bad, src);
+      await rejects(run("source_update", { id: src, exclude: { senders: ["a@b.example"] } }, O()), "exclude_corrupt", 500);
+      await rejects(run("source_update", { id: src, exclude: { domains: ["b.example"] } }, O()), "exclude_corrupt", 500);
+      await run("source_update", { id: src, exclude: { senders: ["a@b.example"], domains: [] } }, O());
+      assert.equal(db.prepare("SELECT exclude_json AS e FROM obs_sources WHERE id = ?").get(src)?.e, '{"senders":["a@b.example"],"domains":[]}', bad);
+      await run("source_update", { id: src, label: "readable again" }, O());
+    }
+  });
+  it("normalises exclusions on write: trim, NFC + lower case, an @domain in senders becomes a domain, no empties or duplicates", async () => {
+    const src = seedSource(db);
+    seedMessage(db, src, { id: "spam", author: "email:x@spam.example" });
+    seedMessage(db, src, { id: "anna", author: "email:ärger@beispiel.de" });
+    seedMessage(db, src, { id: "keep", author: "email:ok@fine.example" });
+    await run("source_update", { id: src, exclude: { senders: ["  ÄRGER@Beispiel.DE ", "@Spam.Example", "", "   ", "ärger@beispiel.de"], domains: [" @Foo.COM ", "foo.com", "A\u0308.example"] } }, O());
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT exclude_json AS e FROM obs_sources WHERE id = ?").get(src)?.e)), {
+      senders: ["ärger@beispiel.de"],
+      domains: ["spam.example", "foo.com", "ä.example"],
+    });
+    assert.deepEqual(db.prepare("SELECT provider_msg_id AS id FROM obs_messages").all().map((r) => r.id), ["keep"], "the moved @domain and the capitals both took effect");
+    // a partial update keeps the stored (normalised) other list
+    await run("source_update", { id: src, exclude: { domains: ["Other.Example"] } }, O());
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT exclude_json AS e FROM obs_sources WHERE id = ?").get(src)?.e)), { senders: ["ärger@beispiel.de"], domains: ["other.example"] });
+  });
+  it("source_add stores normalised exclusions too", async () => {
+    setConnectFactory(() => FAKE);
+    const out = await run("source_add", { account: "acc_gmail_1", conversations: ["inbox"], label: "Mail", exclude: { senders: [" Boss@X.COM", "@Ads.Example"], domains: ["News.Example "] } }, O());
+    assert.deepEqual(JSON.parse(String(db.prepare("SELECT exclude_json AS e FROM obs_sources WHERE id = ?").get(out.source.id)?.e)), { senders: ["boss@x.com"], domains: ["ads.example", "news.example"] });
+  });
+  it("narrowing nulls the thread subject of every record that lost a message (and only those)", async () => {
+    const src = seedSource(db);
+    const touched = seedRecord(db, src, { state: "review", thread: "Re: salary of Anna" });
+    seedMessage(db, src, { id: "a", author: "email:anna@example.com", record: touched, thread: "Re: salary of Anna" });
+    seedMessage(db, src, { id: "b", author: "email:bob@example.com", record: touched, thread: "Re: salary of Anna" });
+    const untouched = seedRecord(db, src, { state: "review", thread: "lunch plans" });
+    seedMessage(db, src, { id: "c", author: "email:bob@example.com", record: untouched, thread: "lunch plans" });
+    await run("source_update", { id: src, exclude: { senders: ["anna@example.com"], domains: [] } }, O());
+    assert.equal(db.prepare("SELECT thread FROM obs_records WHERE id = ?").get(touched)?.thread, null);
+    assert.equal(db.prepare("SELECT thread FROM obs_records WHERE id = ?").get(untouched)?.thread, "lunch plans");
+  });
   it("a damaged exclude_json fails closed (exclude_corrupt, 500) instead of meaning 'exclude nobody'", async () => {
     for (const bad of ["{not json", "[]", "null", '{"senders":"anna","domains":[]}', '{"senders":[],"domains":[1]}', '{"senders":[]}']) {
       const src = seedSource(db);

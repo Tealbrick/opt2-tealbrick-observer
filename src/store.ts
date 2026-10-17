@@ -72,6 +72,14 @@ export function setPrivacy(db: Db, patch: Partial<Privacy>): Privacy {
   });
 }
 
+export function getSetting(db: Db, key: string): string | null {
+  const r = db.prepare("SELECT value FROM obs_settings WHERE key = ?").get(key);
+  return r ? str(r.value) : null;
+}
+export function putSetting(db: Db, key: string, value: string): void {
+  db.prepare("INSERT INTO obs_settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+}
+
 // ───────────────────────────────────────────────────────────────────────── jobs
 export type JobState = "queued" | "running" | "waiting" | "paused" | "done" | "failed" | "cancelled";
 export type JobAction = "start" | "pause" | "resume" | "cancel";
@@ -284,6 +292,21 @@ export function createSource(db: Db, s: NewSource, now: number): { source: strin
   return { source, job };
 }
 
+/** Exclusion entries as stored: trimmed, NFC + lower case (the same form as author_key), no empties or duplicates; an "@domain"
+ *  in senders is a domain. A list the caller leaves out keeps `base`. */
+export function normalizeExclude(raw: { senders?: readonly string[]; domains?: readonly string[] }, base: Exclude): Exclude {
+  const clean = (x: string): string => authorKey(x.trim());
+  const senders: string[] = [];
+  const domains: string[] = [];
+  for (const x of raw.senders ?? base.senders) {
+    const v = clean(x);
+    if (v.startsWith("@")) domains.push(v.replace(/^@+/, "").trim());
+    else senders.push(v);
+  }
+  for (const x of raw.domains ?? base.domains) domains.push(clean(x).replace(/^@+/, "").trim());
+  return { senders: [...new Set(senders.filter(Boolean))], domains: [...new Set(domains.filter(Boolean))] };
+}
+
 // ── author keys and exclusions. SQLite lower() only folds ASCII, so "ÄRGER@Beispiel.de" would survive an exclusion of
 // "ärger@beispiel.de". The key is made in JS (NFC + toLowerCase) when a message is stored and compared in JS.
 export function authorKey(ref: string): string {
@@ -312,6 +335,7 @@ export function isExcluded(key: string, ex: Exclude): boolean {
  *    stored input is emptied (from S4 it holds the text that was sent)
  *  - narrowing: a record left with no message is deleted with its deliveries and flags; a record that keeps some messages
  *    gets a new revision (its content changed) and goes back to Review if it was approved
+ *  - in both modes the thread subject of a touched record is nulled
  *  - purge: message ids stay, so no record is deleted; thread subjects are nulled; an approved record goes back to Review
  */
 function scrubRecords(db: Db, recordIds: Iterable<string>, mode: "narrow" | "purge", now: number): void {
@@ -326,8 +350,8 @@ function scrubRecords(db: Db, recordIds: Iterable<string>, mode: "narrow" | "pur
     db.prepare("UPDATE obs_deliveries SET input_json = '{}', updated_at = ? WHERE record_id = ? AND status = 'sent'").run(now, id);
     db.prepare(
       `UPDATE obs_records SET state = CASE WHEN state = 'approved' THEN 'review' ELSE state END,
-         revision = revision + ?, thread = CASE WHEN ? = 'purge' THEN NULL ELSE thread END, updated_at = ? WHERE id = ?`,
-    ).run(mode === "narrow" ? 1 : 0, mode, now, id);
+         revision = revision + ?, thread = NULL, updated_at = ? WHERE id = ?`,
+    ).run(mode === "narrow" ? 1 : 0, now, id);
   }
 }
 
@@ -561,9 +585,18 @@ export function deliveryRow(db: Db, id: string): Row | undefined {
 }
 
 /** A record that held a secret: the `secret` column (set when the secret was removed before storage) or a `secret` class in
- *  pii_json. Such a record can only be dropped, whatever a rule or the owner's click says (DESIGN §5.3). */
+ *  pii_json. Such a record can only be dropped, whatever a rule or the owner's click says (DESIGN §5.3). FAIL CLOSED: a pii_json
+ *  that cannot be read is treated as a secret. */
 export function isSecretRecord(r: Row): boolean {
-  return Number(r.secret) === 1 || (parsePii(r.pii_json).secret ?? 0) > 0;
+  if (Number(r.secret) === 1) return true;
+  try {
+    const v: unknown = JSON.parse(str(r.pii_json));
+    if (!v || typeof v !== "object" || Array.isArray(v)) return true;
+    const n = (v as Record<string, unknown>).secret;
+    return n !== undefined && !(typeof n === "number" && n === 0);
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -578,38 +611,69 @@ export function routeRecord(record: Row, rules: readonly RuleView[], matches: (r
 }
 
 export type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";
+const MAY_DUPLICATE_AFTER_REDECIDE = "may_duplicate: an earlier attempt may have reached the destination with the previous decision";
 /**
- * The owner decides a waiting record. Secret records: only drop (checked by the caller, which owns the error).
- *  drop → state `dropped`, text goes after the retention.
- *  keep → a flagged record goes back to `delivered`; no new delivery.
- *  deliver / deliver_redacted → state `approved` + ONE outbox row per (record, revision, destination) in status `pending`
- *    with the idempotency key and the exact decide input. SENDING is S4 (nothing is called here).
- * Deciding again on a row that is not sent (failed, pending, held): the NEW decision wins. The row is overwritten (input, status,
- * attempts, hold, next time, error, warning); if an attempt was made before, it gets a new key, because the destination may
- * hold the old input under the old key.
- * Every decision closes the open flags of the record.
+ * The owner decides a waiting record. ALL guards live here (one place, whoever calls):
+ *  1. a secret record (column or pii class, unreadable pii counts too) can only be dropped → secret_drop_only (409)
+ *  2. the record must be in `review` → record_not_waiting (409)
+ *  3. destination: deliver* needs knowledge | kanban | inbox (destination_required / destination_invalid, 400); drop takes
+ *     none or "drop"; keep takes none. keep needs a record that was delivered → nothing_to_keep (409)
+ *  4. deliver* and keep need text: some message of the record still has text and text_purge_at has not passed → text_gone (409)
+ *  5. a delivery of the record that is `held` blocks every decision → delivery_held (409): decide the hold in Holds first
+ *     (S4 will be able to cancel holds; until then deleting the row would orphan the hold)
+ * Effects, one transaction:
+ *  - EVERY decision deletes all non-sent outbox rows of the record except the one being rewritten (a superseded row can never
+ *    be revived by delivery_retry)
+ *  - drop → `dropped`, text goes after the retention. keep → a flagged record goes back to `delivered`, no new delivery.
+ *  - deliver / deliver_redacted → `approved` + ONE outbox row per (record, revision, destination), status `pending`, with the
+ *    idempotency key and the exact decide input. SENDING is S4 (nothing is called here). A row that is not sent is overwritten
+ *    (input, status, attempts, hold, time, error): the NEW decision wins. If an attempt was made before, it gets a new key and
+ *    the warning may_duplicate, because the destination may hold the old input under the old key.
+ *  - every decision closes the open flags of the record
  */
 export function decideRecord(
   db: Db,
   r: Row,
-  d: { decision: Decision; destination: Destination | null; input: unknown },
+  d: { decision: Decision; destination: string | undefined; input: unknown },
   by: string,
   now: number,
   textRetentionDays: number,
 ): void {
+  const id = str(r.id);
+  const revision = Number(r.revision);
+  const deliver = d.decision === "deliver" || d.decision === "deliver_redacted";
+  if (isSecretRecord(r) && d.decision !== "drop") throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
+  if (str(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${str(r.state)}, not waiting for review`, 409);
+  if (deliver) {
+    if (d.destination === undefined) throw new TbError("destination_required", "choose where to deliver the record", 400);
+    if (d.destination !== "knowledge" && d.destination !== "kanban" && d.destination !== "inbox") throw new TbError("destination_invalid", "choose knowledge, kanban or inbox", 400);
+  } else if (d.destination !== undefined && (d.decision === "keep" || d.destination !== "drop")) {
+    throw new TbError("destination_invalid", `a ${d.decision === "keep" ? "kept" : "dropped"} record has no destination`, 400);
+  }
+  if (d.decision === "keep" && !hasSentDelivery(db, id)) throw new TbError("nothing_to_keep", "this record was never delivered, so there is nothing to keep", 409);
+  if (d.decision !== "drop") {
+    const text = db.prepare("SELECT 1 AS x FROM obs_messages WHERE record_id = ? AND text IS NOT NULL AND deleted = 0 LIMIT 1").get(id);
+    const expired = r.text_purge_at !== null && r.text_purge_at !== undefined && Number(r.text_purge_at) <= now;
+    if (!text || expired) throw new TbError("text_gone", "the text of this record is gone (purged or past its retention); it can only be dropped", 409);
+  }
+  if (db.prepare("SELECT 1 AS x FROM obs_deliveries WHERE record_id = ? AND status = 'held'").get(id)) {
+    throw new TbError("delivery_held", "a delivery of this record waits for approval; decide the hold in Holds first", 409);
+  }
   db.transaction(() => {
-    const id = str(r.id);
-    const revision = Number(r.revision);
     const purgeAt = now + textRetentionDays * DAY_MS;
     if (d.decision === "keep") {
-      db.prepare("UPDATE obs_records SET state = 'delivered', decided_by = ?, decided_at = ?, updated_at = ? WHERE id = ?").run(by, now, now, id);
+      db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent'").run(id);
+      db.prepare("UPDATE obs_records SET state = 'delivered', decided_by = ?, decided_at = ?, decided_destination = NULL, updated_at = ? WHERE id = ?").run(by, now, now, id);
     } else if (d.decision === "drop") {
-      db.prepare("UPDATE obs_records SET state = 'dropped', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, purgeAt, now, id);
+      db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent'").run(id);
+      db.prepare("UPDATE obs_records SET state = 'dropped', decided_by = ?, decided_at = ?, decided_destination = NULL, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, purgeAt, now, id);
     } else {
       const dest = d.destination as Destination;
       const input = JSON.stringify(d.input);
       const existing = db.prepare("SELECT * FROM obs_deliveries WHERE record_id = ? AND revision = ? AND destination = ?").get(id, revision, dest);
       if (existing && str(existing.status) === "sent") throw new TbError("already_delivered", "this revision of the record was already delivered to this destination", 409);
+      // every other non-sent row is superseded by this decision
+      db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent' AND id <> ?").run(id, existing ? str(existing.id) : "");
       if (!existing) {
         db.prepare(
           `INSERT INTO obs_deliveries (id, record_id, revision, destination, idem_key, input_json, status, attempts, created_at, updated_at)
@@ -619,10 +683,10 @@ export function decideRecord(
         const attempted = existing.first_attempt_at !== null && existing.first_attempt_at !== undefined;
         db.prepare(
           `UPDATE obs_deliveries SET input_json = ?, status = 'pending', attempts = 0, hold_id = NULL, next_at = NULL, first_attempt_at = NULL,
-             last_error = NULL, warning = NULL, idem_key = ?, updated_at = ? WHERE id = ?`,
-        ).run(input, attempted ? deliveryKey(id, revision, dest, now) : str(existing.idem_key), now, str(existing.id));
+             last_error = NULL, warning = ?, idem_key = ?, updated_at = ? WHERE id = ?`,
+        ).run(input, attempted ? MAY_DUPLICATE_AFTER_REDECIDE : null, attempted ? deliveryKey(id, revision, dest, now) : str(existing.idem_key), now, str(existing.id));
       }
-      db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, purgeAt, now, id);
+      db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, decided_destination = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, dest, purgeAt, now, id);
     }
     db.prepare("UPDATE obs_flags SET closed_at = ? WHERE record_id = ? AND closed_at IS NULL").run(now, id);
   });
@@ -639,6 +703,14 @@ export function hasSentDelivery(db: Db, recordId: string): boolean {
  * made and the row keeps a may_duplicate warning (shown by deliveries_list).
  */
 export function retryDelivery(db: Db, r: Row, now: number): DeliveryView {
+  const rec = recordRow(db, str(r.record_id));
+  // a secret record is never delivered, also not by a retry of a row that was written before the secret was found
+  if (rec && isSecretRecord(rec)) throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
+  // only the row the owner's LAST decision made: the record is approved, at this row's revision, for this row's destination.
+  // A row left over from an earlier decision (another destination, an older revision, a dropped record) is never revived.
+  if (!rec || str(rec.state) !== "approved" || Number(rec.revision) !== Number(r.revision) || strOrNull(rec.decided_destination) !== str(r.destination)) {
+    throw new TbError("delivery_state_invalid", "this delivery does not belong to the owner's last decision on the record; decide the record in Review", 409);
+  }
   if (str(r.status) !== "failed") throw new TbError("delivery_state_invalid", `cannot retry a delivery that is ${str(r.status)}`, 409);
   const first = r.first_attempt_at === null || r.first_attempt_at === undefined ? null : Number(r.first_attempt_at);
   const stale = first !== null && now - first > SAME_KEY_WINDOW_MS;
@@ -682,31 +754,22 @@ export function openFlag(db: Db, agent: string, recordId: string): string | null
 export function flagsToday(db: Db, agent: string, now: number): number {
   return Number(db.prepare("SELECT COUNT(*) AS c FROM obs_flags WHERE by_id = ? AND created_at > ?").get(agent, now - DAY_MS)?.c ?? 0);
 }
-/** Record the flag and put the record back into Review (one transaction). */
+/** Record the flag and put the record back into Review (one transaction). The revision goes up, so the owner can replace the
+ *  flagged delivery: deliver / deliver_redacted to the same destination is then a NEW outbox row (the old one stays `sent`). */
 export function addFlag(db: Db, recordId: string, by: { type: string; id: string }, reason: string, now: number): string {
   const id = `flg_${ulid(now)}`;
   db.transaction(() => {
     db.prepare("INSERT INTO obs_flags (id, record_id, by_type, by_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, recordId, by.type, by.id, reason, now);
-    db.prepare("UPDATE obs_records SET state = 'review', decided_by = NULL, decided_at = NULL, updated_at = ? WHERE id = ?").run(now, recordId);
+    db.prepare("UPDATE obs_records SET state = 'review', revision = revision + 1, decided_by = NULL, decided_at = NULL, decided_destination = NULL, updated_at = ? WHERE id = ?").run(now, recordId);
   });
   return id;
 }
 
 // ───────────────────────────────────────────────────────────────────────── digests
-/** text_digest = HMAC-SHA256 under the app secret `obs_digest_key` (a plain hash of a short message can be guessed). */
-export const DIGEST_KEY_NAME = "obs_digest_key";
+/** text_digest = HMAC-SHA256 under the app secret `obs_digest_key` (a plain hash of a short message can be guessed).
+ *  The key itself is handled by digest.ts. */
 export function textDigest(key: string, text: string): string {
   return `hmac-sha256:${createHmac("sha256", key).update(text, "utf8").digest("hex")}`;
-}
-let digestKey: string | null = null;
-/** Bound once in onStart (the key comes from ctx.secrets). */
-export function bindDigestKey(key: string | null): void {
-  digestKey = key;
-}
-/** The digest S2's ingestion stores for a message text. Refuses to run before the key is bound (never an unkeyed hash). */
-export function digestOf(text: string): string {
-  if (!digestKey) throw new TbError("digest_key_missing", "the digest key is not available", 500);
-  return textDigest(digestKey, text);
 }
 
 // ───────────────────────────────────────────────────────────────────────── rules

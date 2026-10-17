@@ -81,6 +81,10 @@ export interface RecordSeed {
   thread?: string | null;
   textPurgeAt?: number | null;
   updatedAt?: number;
+  /** also store one message with text for this record (a record can be delivered only while it has text) */
+  withText?: boolean;
+  /** the destination the owner decided (an approved record) */
+  destination?: "knowledge" | "kanban" | "inbox" | null;
 }
 export function seedRecord(db: Db, source: string, r: RecordSeed = {}): string {
   const id = r.id ?? `rec_${ulid()}`;
@@ -89,6 +93,8 @@ export function seedRecord(db: Db, source: string, r: RecordSeed = {}): string {
     `INSERT INTO obs_records (id, source_id, thread, window_start, window_end, revision, state, pii_json, secret, text_purge_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(id, source, r.thread ?? "t1", t - 60_000, t, r.revision ?? 1, r.state ?? "review", JSON.stringify(r.pii ?? {}), r.secret ? 1 : 0, r.textPurgeAt ?? null, t, t);
+  if (r.destination) db.prepare("UPDATE obs_records SET decided_destination = ? WHERE id = ?").run(r.destination, id);
+  if (r.withText) seedMessage(db, source, { record: id, text: "some words", id: `m_${id}` });
   return id;
 }
 
@@ -109,6 +115,8 @@ export function seedDelivery(db: Db, record: string, d: DeliverySeed = {}): stri
     `INSERT INTO obs_deliveries (id, record_id, revision, destination, target_ref, idem_key, input_json, status, attempts, first_attempt_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 1, ?, ?, ?)`,
   ).run(id, record, d.revision ?? 1, d.destination ?? "knowledge", d.targetRef ?? null, d.key ?? `obs_${id}`, d.status ?? "sent", d.firstAttemptAt ?? null, t, t);
+  // an approved record without a decided destination takes the one of its first delivery (what review_decide would have set)
+  db.prepare("UPDATE obs_records SET decided_destination = ? WHERE id = ? AND state = 'approved' AND decided_destination IS NULL AND revision = ?").run(d.destination ?? "knowledge", record, d.revision ?? 1);
   return id;
 }
 

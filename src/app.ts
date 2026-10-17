@@ -10,7 +10,6 @@
 // S1 scope: the owner ops on the real tables. NOT here yet: reading sources (needs Connect's data_* ops, spec request R3 →
 // `connect_unavailable`), the job runner (S2), classification (S3), sending deliveries (S4), the UI (S5), retention jobs (S6).
 
-import { randomBytes } from "node:crypto";
 import type { OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { type Db, defineApp, type HandlerSpec, type SdkAppDefinition, TbError } from "@opt2-tealbrick/miniapp-sdk";
 import {
@@ -50,17 +49,16 @@ import {
 } from "#kit";
 import { now, setClock } from "./clock.ts";
 import { connectPort, requireConnect } from "./connect.ts";
+import { digestAttention, setupDigestKey } from "./digest.ts";
 import { manifest, migrationsDir } from "./manifest.ts";
 import {
   activeBackfill,
   addFlag,
   BACKFILL_DEFAULT_MAX_MESSAGES,
   BACKFILL_MAX_YEARS,
-  bindDigestKey,
   conversationsOf,
   createBackfill,
   createSource,
-  DIGEST_KEY_NAME,
   decideRecord,
   deleteRule,
   deliveredRecord,
@@ -72,13 +70,12 @@ import {
   FLAGS_PER_AGENT_PER_DAY,
   flagsToday,
   getPrivacy,
-  hasSentDelivery,
-  isSecretRecord,
   jobRow,
   jobView,
   listJobs,
   listRules,
   listSources,
+  normalizeExclude,
   notFound,
   openFlag,
   pageOf,
@@ -220,7 +217,7 @@ export const handlers = {
           kind: account.kind,
           label,
           conversations,
-          exclude: { senders: i.exclude?.senders ?? [], domains: i.exclude?.domains ?? [] },
+          exclude: normalizeExclude(i.exclude ?? {}, { senders: [], domains: [] }),
           liveIntervalS: i.liveIntervalS ?? 60,
           retentionDays: i.retentionDays ?? null,
           historyCapable: account.historyCapable,
@@ -240,8 +237,10 @@ export const handlers = {
       const conversations = i.conversations !== undefined ? [...new Set(i.conversations)] : before;
       if (conversations.length === 0) throw new TbError("conversations_empty", "a source needs at least one conversation (remove the source to stop watching)", 400);
       // TODO(S2): check the conversation ids against Connect's catalog, and re-run the estimate when the list widens.
-      const oldEx = excludeOf(r);
-      const exclude = { senders: i.exclude?.senders ?? oldEx.senders, domains: i.exclude?.domains ?? oldEx.domains };
+      // a FULL new exclude (both lists) replaces whatever is stored, also a damaged value; a partial one needs the stored one
+      const full = i.exclude?.senders !== undefined && i.exclude?.domains !== undefined;
+      const oldEx = full ? { senders: [], domains: [] } : excludeOf(r);
+      const exclude = i.exclude ? normalizeExclude(i.exclude, oldEx) : oldEx;
       const retention = i.retentionDays !== undefined ? i.retentionDays : r.retention_days === null ? null : Number(r.retention_days);
       ctx.db.transaction(() => {
         ctx.db
@@ -373,25 +372,8 @@ export const handlers = {
     async run(i, ctx) {
       const r = recordRow(ctx.db, i.recordId);
       if (!r) throw notFound("record");
-      // a record with a secret in it can only be dropped, whatever its state (DESIGN §5.3): the column and the pii class both count
-      if (isSecretRecord(r) && i.decision !== "drop") throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
-      if (String(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${String(r.state)}, not waiting for review`, 409);
-      if (i.decision === "drop" || i.decision === "keep") {
-        if (i.destination !== undefined && (i.decision === "keep" || i.destination !== "drop")) throw new TbError("destination_invalid", `a ${i.decision === "keep" ? "kept" : "dropped"} record has no destination`, 400);
-        // keep = the owner reviewed a flagged record and leaves the delivered document as it is
-        if (i.decision === "keep" && !hasSentDelivery(ctx.db, i.recordId)) throw new TbError("nothing_to_keep", "this record was never delivered, so there is nothing to keep", 409);
-      } else {
-        if (i.destination === undefined) throw new TbError("destination_required", "choose where to deliver the record", 400);
-        if (i.destination === "drop") throw new TbError("destination_invalid", "choose knowledge, kanban or inbox", 400);
-      }
-      decideRecord(
-        ctx.db,
-        r,
-        { decision: i.decision, destination: i.decision === "drop" || i.decision === "keep" ? null : (i.destination as "knowledge" | "kanban" | "inbox"), input: i },
-        ctx.caller.id,
-        now(),
-        getPrivacy(ctx.db).textRetentionDays,
-      );
+      // every guard (secret, state, destination, keep, text, held) lives in decideRecord
+      decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, input: i }, ctx.caller.id, now(), getPrivacy(ctx.db).textRetentionDays);
       ctx.statusChanged();
       const row = recordRow(ctx.db, i.recordId);
       if (!row) throw notFound("record");
@@ -431,9 +413,6 @@ export const handlers = {
     async run(i, ctx) {
       const r = deliveryRow(ctx.db, i.id);
       if (!r) throw notFound("delivery");
-      // a secret record is never delivered, also not by a retry of a row that was written before the secret was found
-      const rec = recordRow(ctx.db, String(r.record_id));
-      if (rec && isSecretRecord(rec)) throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
       // S1: the row changes (failed → pending); S4 sends it with the stored key
       return { delivery: retryDelivery(ctx.db, r, now()) };
     },
@@ -470,15 +449,15 @@ export const definition: SdkAppDefinition = {
   migrations: migrationsDir,
   async onStart(ctx) {
     bindDb(ctx.db);
-    // the HMAC key for message digests: created once, kept in the app secrets (sealed under TB_KEK, not in the DB)
-    let key = await ctx.secrets.get(DIGEST_KEY_NAME);
-    if (!key) {
-      key = randomBytes(32).toString("base64");
-      await ctx.secrets.put(DIGEST_KEY_NAME, key);
-    }
-    bindDigestKey(key);
-    // rule 0, "never keep secrets": created at start, locked, always first (DESIGN §3.2)
+    // rule 0, "never keep secrets": created at start, locked, always first (DESIGN §3.2). FIRST, so nothing below can leave the
+    // app without it.
     ensureRuleZero(ctx.db, now());
+    // the HMAC key for message digests (digest.ts): a failure is logged and shown as attention, it does not stop the start
+    await setupDigestKey(ctx, now());
+  },
+  // The owner must act when the digest key is gone or the secret store failed (digest.ts); S2 adds failed jobs.
+  async attention() {
+    return digestAttention();
   },
   // Records waiting in Review (C86): canvas badge and the count of things that need the owner.
   async pendingCount(db) {
