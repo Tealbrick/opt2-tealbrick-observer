@@ -1,5 +1,5 @@
 // Smoke test: the app boots on the SDK (manifest, handler set and migrations accepted), serves the derived routes,
-// and its handlers work against the migrated table. Agent calls through a bridge are covered by `pnpm conformance`.
+// and the migrated tables exist (rule 0 was created at start). Agent calls through a bridge are covered by `pnpm conformance`.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -8,10 +8,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { manifestDigest, validateManifest } from "@opt2-tealbrick/manifest";
-import { type Db, defineApp, type OpContext, startApp } from "@opt2-tealbrick/miniapp-sdk";
+import { type Db, defineApp, startApp } from "@opt2-tealbrick/miniapp-sdk";
 import { MANIFEST_DIGEST, OP } from "#kit";
 import { definition, handlers, manifest } from "../src/app.ts";
-import { COLLECTION, createItem, listItems } from "../src/items.ts";
+import { RULE_ZERO_ID } from "../src/store.ts";
 
 async function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -43,7 +43,7 @@ test("the generated kit matches the manifest and every operation has exactly one
   assert.deepEqual(Object.keys(handlers).sort(), ids);
 });
 
-test("boots on the SDK, serves derived routes, handlers work on the migrated table", async (t) => {
+test("boots on the SDK, serves derived routes, creates its tables and rule 0", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), `${manifest.id}-test-`));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const port = await freePort();
@@ -59,7 +59,7 @@ test("boots on the SDK, serves derived routes, handlers work on the migrated tab
     const openapi = (await (await fetch(`${base}/tb/v1/openapi.json`)).json()) as { paths: Record<string, unknown> };
     for (const op of manifest.operations) assert.ok(Object.keys(openapi.paths).some((p) => p.endsWith(`/${op.id}`)), `openapi lists ${op.id}`);
     // agent operations need a bridge (call proof + grant); app-alone mode refuses them
-    const refused = await fetch(`${base}/tb/v1/ops/items_list`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: {} }) });
+    const refused = await fetch(`${base}/tb/v1/ops/status`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ input: {} }) });
     assert.equal(refused.status, 503);
   } finally {
     await running.stop();
@@ -67,28 +67,18 @@ test("boots on the SDK, serves derived routes, handlers work on the migrated tab
 
   const { db, close } = openDb(join(dir, "app.db"));
   t.after(close);
-  const caller = { type: "agent", id: "agt_01J0000000000000000000000A", name: "Agent A", mode: "free" };
-  const ctx = (readable: string[]) => ({ db, caller, scope: { readable: async () => readable } }) as unknown as OpContext;
-
-  assert.equal(handlers.item_create.scope?.({ title: "x" }, caller as OpContext["caller"]), caller.id, "default target is the own collection");
-  assert.equal(handlers.items_list.scope?.({}, caller as OpContext["caller"]), null, "no collection = across readable ones");
-
-  const created = (await handlers.item_create.run({ title: "first" }, ctx([]))) as { id: string; collection: string };
-  assert.equal(created.collection, caller.id);
-  assert.match(created.id, /^itm_/);
-  createItem(db, { collection: "shared", title: "second", createdBy: caller.id }, Date.now() + 1000);
-
-  const mine = (await handlers.items_list.run({}, ctx([caller.id]))) as { items: { title: string }[] };
+  for (const table of ["obs_sources", "obs_jobs", "obs_messages", "obs_records", "obs_deliveries", "obs_rules", "obs_flags", "obs_settings"])
+    assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(table), `table ${table}`);
+  // onStart made the locked rule 0 (the real start path, not a test call)
+  const rules = db.prepare("SELECT id, position, locked FROM obs_rules").all();
   assert.deepEqual(
-    mine.items.map((i) => i.title),
-    ["first"],
+    rules.map((r) => ({ ...r })),
+    [{ id: RULE_ZERO_ID, position: 0, locked: 1 }],
   );
-  const both = (await handlers.items_list.run({ limit: 1 }, ctx([caller.id, "shared"]))) as { items: { title: string }[] };
-  assert.deepEqual(
-    both.items.map((i) => i.title),
-    ["second"],
-    "newest first, limited",
-  );
-  assert.deepEqual(listItems(db, [], 10), [], "no readable collection = no items");
-  assert.equal(COLLECTION, manifest.scopes?.[0]?.type);
+});
+
+test("every op has one handler, the agent ops are exactly status, job_pause and flag, and no op is the template's items", () => {
+  assert.equal(Object.keys(handlers).length, 28);
+  assert.ok(!("items_list" in handlers) && !("item_create" in handlers));
+  assert.deepEqual(manifest.operations.filter((o) => o.audience === "agent").map((o) => o.id).sort(), ["flag", "job_pause", "status"]);
 });

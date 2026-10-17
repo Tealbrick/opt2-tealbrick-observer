@@ -3,112 +3,2625 @@
   "schema": "tealbrick.miniapp/2",
   "id": "observer",
   "name": "Observer",
-  "summary": "Observer keeps short items in collections that your agents can list and add to.",
+  "summary": "Reads the conversations you choose, read only, and files what matters: classified first, then sent to Knowledge, Task Board or you.",
+  "description": "Observer watches the conversations you share with it through Connect (read only) and turns them into records: grouped by thread, checked for secrets and personal data by fixed rules, and routed by your rules to Knowledge (as drafts by default), Task Board or a person in Operator Inbox. Anything with personal data or no matching rule waits for your review. Secrets are never kept. Live reading is off until you press Start; message text is kept 30 days by default. Observer never sends, edits or deletes a message.",
   "version": "0.1.0",
   "sdkMajor": 1,
-  "publisher": { "name": "Observer authors" },
-  "source": { "repo": "https://github.com/Tealbrick/opt2-tealbrick-observer", "license": "Apache-2.0" },
-  "icon": { "svgPath": "M4 5h16v14H4z M8 9h8 M8 13h8 M8 17h5", "viewBox": "0 0 24 24" },
+  "publisher": {
+    "name": "Tealbrick"
+  },
+  "source": {
+    "repo": "https://github.com/Tealbrick/opt2-tealbrick-observer",
+    "license": "Apache-2.0"
+  },
+  "icon": {
+    "svgPath": "M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z M12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z",
+    "viewBox": "0 0 24 24"
+  },
   "discovery": {
     "category": "productivity",
-    "intents": ["keep a list of items", "add an item to my collection", "list my items"],
-    "keywords": ["items", "list", "collection"]
+    "intents": [
+      "read my slack history into knowledge",
+      "turn chat messages into notes",
+      "watch a channel and file what matters",
+      "import email threads into knowledge",
+      "find requests in my messages"
+    ],
+    "keywords": [
+      "observer",
+      "backfill",
+      "history",
+      "messages",
+      "slack",
+      "gmail",
+      "telegram",
+      "discord",
+      "classify",
+      "pii"
+    ]
   },
   "runtime": {
-    "build": { "context": ".", "dockerfile": "Dockerfile" },
+    "build": {
+      "context": ".",
+      "dockerfile": "Dockerfile"
+    },
     "port": 8080,
     "healthPath": "/tb/v1/health",
-    "resources": { "cpu": 0.25, "memoryMb": 256 },
+    "resources": {
+      "cpu": 0.5,
+      "memoryMb": 512
+    },
     "volumes": [
-      { "id": "data", "mountPath": "/data", "sizeGb": 1, "purpose": "data" },
-      { "id": "backup", "mountPath": "/backup", "sizeGb": 2, "purpose": "backup" }
+      {
+        "id": "data",
+        "mountPath": "/data",
+        "sizeGb": 5,
+        "purpose": "data"
+      },
+      {
+        "id": "backup",
+        "mountPath": "/backup",
+        "sizeGb": 10,
+        "purpose": "backup"
+      }
     ]
   },
   "operations": [
     {
-      "id": "items_list",
-      "title": "List items",
-      "description": "List the newest items in one collection, or in every collection the caller may read.",
+      "audience": "agent",
+      "id": "status",
+      "title": "Observer status",
+      "description": "What Observer watches and how far it got: sources with live and history state, and how many records wait for the owner. Labels and counts only — never message text, senders or titles.",
       "input": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {
-          "collection": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
-        }
+        "properties": {}
       },
       "output": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items"],
+        "required": [
+          "sources",
+          "review"
+        ],
         "properties": {
-          "items": {
+          "sources": {
             "type": "array",
+            "maxItems": 100,
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["id", "collection", "title", "createdAt"],
+              "required": [
+                "id",
+                "label",
+                "kind",
+                "live",
+                "history",
+                "liveJobId",
+                "historyJobId"
+              ],
               "properties": {
-                "id": { "type": "string" },
-                "collection": { "type": "string" },
-                "title": { "type": "string" },
-                "createdAt": { "type": "string" }
+                "id": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 40,
+                  "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32
+                },
+                "liveJobId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "historyJobId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 64
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "live": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "lastReadAt",
+                    "nextAt"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "lastReadAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "nextAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "history": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "done",
+                    "total",
+                    "since"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "done": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000000
+                    },
+                    "total": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "since": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "review": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "waiting"
+            ],
+            "properties": {
+              "waiting": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
               }
             }
           }
         }
       },
-      "crud": ["read"],
+      "crud": [
+        "read"
+      ],
       "effect": "read",
-      "scopeType": "collection",
       "idempotency": "none",
-      "receipt": false,
-      "audience": "agent"
+      "receipt": false
     },
     {
-      "id": "item_create",
-      "title": "Create item",
-      "description": "Add an item to a collection the caller may write to (default: the caller's own collection).",
+      "audience": "agent",
+      "id": "job_pause",
+      "title": "Pause an Observer job",
+      "description": "Pause a live or history job (for example when it reads too much). Only the owner can start, resume or cancel jobs.",
       "input": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["title"],
+        "required": [
+          "jobId"
+        ],
         "properties": {
-          "collection": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "title": { "type": "string", "minLength": 1, "maxLength": 200 }
+          "jobId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
         }
       },
       "output": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "collection"],
+        "required": [
+          "job"
+        ],
         "properties": {
-          "id": { "type": "string" },
-          "collection": { "type": "string" }
+          "job": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "state"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              }
+            }
+          }
         }
       },
-      "crud": ["create"],
-      "effect": "write",
-      "scopeType": "collection",
-      "idempotency": "required",
-      "receipt": true,
-      "audience": "agent"
-    }
-  ],
-  "scopes": [
-    {
-      "type": "collection",
-      "label": "Collection",
-      "labelPlural": "Collections",
-      "access": [
-        { "id": "read", "label": "Read", "crud": ["read"] },
-        { "id": "read_write", "label": "Read and add", "crud": ["read", "create"] }
+      "crud": [
+        "update"
       ],
-      "defaultGrants": [{ "kind": "own", "access": "read_write" }],
-      "summaryTemplate": "{count} {labelPlural} ({access.read_write} writable)"
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "agent",
+      "id": "flag",
+      "title": "Flag a delivered record",
+      "description": "Send a record that Observer delivered back to the owner's Review (for example a Knowledge document that is wrong or should not exist), with a reason. An id Observer did not deliver answers not_found.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "documentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rec_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "flagId"
+        ],
+        "properties": {
+          "flagId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "sources_available",
+      "title": "Available sources",
+      "description": "Connect accounts shared with Observer (read only) and their conversations with estimated counts.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "accounts",
+          "connectMissing"
+        ],
+        "properties": {
+          "accounts": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object"
+            }
+          },
+          "connectMissing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "sources_list",
+      "title": "Sources",
+      "description": "The sources Observer watches, with jobs, rules and counts.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sources"
+        ],
+        "properties": {
+          "sources": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "label",
+                "kind",
+                "account",
+                "conversations",
+                "live",
+                "history"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 40,
+                  "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 80
+                },
+                "kind": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32
+                },
+                "account": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "conversations": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "live": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "lastReadAt",
+                    "nextAt"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "lastReadAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "nextAt": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "history": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "state",
+                    "done",
+                    "total",
+                    "since"
+                  ],
+                  "properties": {
+                    "state": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "done": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 1000000000
+                    },
+                    "total": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 1000000000
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "since": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 40
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "source_get",
+      "title": "Source",
+      "description": "One source with its jobs and counts.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "jobs"
+        ],
+        "properties": {
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "label",
+              "kind",
+              "account",
+              "conversations",
+              "live",
+              "history"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "conversations": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "live": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "lastReadAt",
+                  "nextAt"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "lastReadAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "nextAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "history": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "done",
+                  "total",
+                  "since"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "done": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "since": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "jobs": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "source",
+                "kind",
+                "state",
+                "counts",
+                "lastError",
+                "retryAt"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 40,
+                  "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "live",
+                    "backfill"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16
+                },
+                "counts": {
+                  "type": "object"
+                },
+                "lastError": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 280
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retryAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "source_add",
+      "title": "Add a source",
+      "description": "Watch conversations of one shared Connect account. The live job starts PAUSED until you press Start.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "account",
+          "conversations",
+          "label"
+        ],
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "conversations": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "exclude": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "senders": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "domains": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                }
+              }
+            }
+          },
+          "liveIntervalS": {
+            "type": "integer",
+            "minimum": 15,
+            "maximum": 3600
+          },
+          "retentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "label",
+              "kind",
+              "account",
+              "conversations",
+              "live",
+              "history"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "conversations": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "live": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "lastReadAt",
+                  "nextAt"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "lastReadAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "nextAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "history": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "done",
+                  "total",
+                  "since"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "done": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "since": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "source_update",
+      "title": "Change a source",
+      "description": "Change label, exclusions, interval or conversations. Narrowing applies at once.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "conversations": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "exclude": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "senders": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "domains": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                }
+              }
+            }
+          },
+          "liveIntervalS": {
+            "type": "integer",
+            "minimum": 15,
+            "maximum": 3600
+          },
+          "retentionDays": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 365
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "label",
+              "kind",
+              "account",
+              "conversations",
+              "live",
+              "history"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              },
+              "account": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "conversations": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "live": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "lastReadAt",
+                  "nextAt"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "lastReadAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "nextAt": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              },
+              "history": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "state",
+                  "done",
+                  "total",
+                  "since"
+                ],
+                "properties": {
+                  "state": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 16
+                  },
+                  "done": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1000000000
+                  },
+                  "total": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000000
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "since": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 40
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "source_remove",
+      "title": "Remove a source",
+      "description": "Stop watching a source and delete its stored text and message ids. Documents already delivered to Knowledge stay.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "removed",
+          "messagesPurged"
+        ],
+        "properties": {
+          "removed": {
+            "type": "boolean"
+          },
+          "messagesPurged": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          }
+        }
+      },
+      "crud": [
+        "update",
+        "delete"
+      ],
+      "effect": "destructive",
+      "holdFamily": "destructive",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "jobs_list",
+      "title": "Jobs",
+      "description": "Live and history jobs with state, counts, last error and next retry.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "source",
+                "kind",
+                "state",
+                "counts",
+                "lastError",
+                "retryAt"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 40,
+                  "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "live",
+                    "backfill"
+                  ]
+                },
+                "state": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 16
+                },
+                "counts": {
+                  "type": "object"
+                },
+                "lastError": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 0,
+                      "maxLength": 280
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "retryAt": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 40
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "job_get",
+      "title": "Job",
+      "description": "One job.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "source",
+              "kind",
+              "state",
+              "counts",
+              "lastError",
+              "retryAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "source": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "backfill"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              },
+              "counts": {
+                "type": "object"
+              },
+              "lastError": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 280
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "retryAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "job_control",
+      "title": "Start, pause, resume or cancel a job",
+      "description": "Owner control of one job.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "action"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "start",
+              "pause",
+              "resume",
+              "cancel"
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "source",
+              "kind",
+              "state",
+              "counts",
+              "lastError",
+              "retryAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "source": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "backfill"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              },
+              "counts": {
+                "type": "object"
+              },
+              "lastError": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 280
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "retryAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "backfill_estimate",
+      "title": "Estimate a history read",
+      "description": "How many messages and records a history read would take, and how long.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "since"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "since": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "until": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "messages",
+          "records",
+          "durationS",
+          "providerNote"
+        ],
+        "properties": {
+          "messages": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          },
+          "records": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          },
+          "durationS": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          },
+          "providerNote": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 280
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "backfill_start",
+      "title": "Read history",
+      "description": "Read older messages of a source, at most 3 years back and 500 000 messages (default 50 000).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source",
+          "since"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "since": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "until": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "maxMessages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500000
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "source",
+              "kind",
+              "state",
+              "counts",
+              "lastError",
+              "retryAt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "source": {
+                "type": "string",
+                "minLength": 7,
+                "maxLength": 40,
+                "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "backfill"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 16
+              },
+              "counts": {
+                "type": "object"
+              },
+              "lastError": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 0,
+                    "maxLength": 280
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "retryAt": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 40
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "create"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "rules_list",
+      "title": "Routing rules",
+      "description": "The ordered routing rules. Rule 0 (never keep secrets) is locked.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "rule_put",
+      "title": "Add or change a rule",
+      "description": "Add or change one routing rule: what to match and where to deliver.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "position",
+          "match",
+          "action"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rul_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "position": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 999
+          },
+          "match": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "sources": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string",
+                  "minLength": 7,
+                  "maxLength": 40,
+                  "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+                }
+              },
+              "conversations": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "senders": {
+                "type": "array",
+                "maxItems": 200,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "words": {
+                "type": "array",
+                "maxItems": 50,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "pii": {
+                "type": "array",
+                "maxItems": 16,
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 32
+                }
+              },
+              "actionable": {
+                "type": "boolean"
+              },
+              "minWords": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10000
+              }
+            }
+          },
+          "action": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "deliver"
+            ],
+            "properties": {
+              "deliver": {
+                "type": "string",
+                "enum": [
+                  "knowledge",
+                  "kanban",
+                  "inbox",
+                  "drop"
+                ]
+              },
+              "area": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "project": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "assignee": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "low",
+                  "medium",
+                  "high"
+                ]
+              },
+              "redact": {
+                "type": "boolean"
+              },
+              "knowledgeStatus": {
+                "type": "string",
+                "enum": [
+                  "draft",
+                  "published"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rule"
+        ],
+        "properties": {
+          "rule": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "create",
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "required",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "rule_delete",
+      "title": "Delete a rule",
+      "description": "Delete one routing rule. Rule 0 cannot be deleted.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rul_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "crud": [
+        "update",
+        "delete"
+      ],
+      "effect": "destructive",
+      "holdFamily": "destructive",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "rules_reorder",
+      "title": "Reorder rules",
+      "description": "Set the order of the routing rules.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "minLength": 7,
+              "maxLength": 40,
+              "pattern": "^rul_[0-9A-HJKMNP-TV-Z]{26}$"
+            }
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "rules"
+        ],
+        "properties": {
+          "rules": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object"
+            }
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "review_list",
+      "title": "Review",
+      "description": "Records that wait for the owner.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "review_get",
+      "title": "Review a record",
+      "description": "One waiting record with its text and the detected spans.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rec_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record"
+        ],
+        "properties": {
+          "record": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "review_decide",
+      "title": "Decide a record",
+      "description": "Deliver, deliver redacted, or drop a waiting record. Secret-class records can only be dropped.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "recordId",
+          "decision"
+        ],
+        "properties": {
+          "recordId": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rec_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "deliver",
+              "deliver_redacted",
+              "drop",
+              "keep"
+            ]
+          },
+          "destination": {
+            "type": "string",
+            "enum": [
+              "knowledge",
+              "kanban",
+              "inbox",
+              "drop"
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record"
+        ],
+        "properties": {
+          "record": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "records_list",
+      "title": "Records",
+      "description": "Classified records (text only while inside the retention).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "state": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "record_get",
+      "title": "Record",
+      "description": "One classified record.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^rec_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "record"
+        ],
+        "properties": {
+          "record": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "deliveries_list",
+      "title": "Deliveries",
+      "description": "Outbox rows: pending, held, sent or failed.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "held",
+              "sent",
+              "failed"
+            ]
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "nextCursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "maxItems": 50,
+            "items": {
+              "type": "object"
+            }
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "delivery_retry",
+      "title": "Retry a delivery",
+      "description": "Send a failed delivery again with the same stored key (after 23 h: a new key, with a may-duplicate warning).",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^dlv_[0-9A-HJKMNP-TV-Z]{26}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "delivery"
+        ],
+        "properties": {
+          "delivery": {
+            "type": "object"
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "privacy_get",
+      "title": "Privacy settings",
+      "description": "How long Observer keeps message text and review records.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "textRetentionDays",
+          "reviewRetentionDays",
+          "onSourceDelete"
+        ],
+        "properties": {
+          "textRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "reviewRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "onSourceDelete": {
+            "type": "string",
+            "enum": [
+              "purge",
+              "keep"
+            ]
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "privacy_set",
+      "title": "Change privacy settings",
+      "description": "Text retention (1–365 days, default 30), review retention (default 90) and what happens when a provider deletes a message.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "textRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "reviewRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "onSourceDelete": {
+            "type": "string",
+            "enum": [
+              "purge",
+              "keep"
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "textRetentionDays",
+          "reviewRetentionDays",
+          "onSourceDelete"
+        ],
+        "properties": {
+          "textRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "reviewRetentionDays": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 365
+          },
+          "onSourceDelete": {
+            "type": "string",
+            "enum": [
+              "purge",
+              "keep"
+            ]
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
+      "id": "purge",
+      "title": "Delete stored text now",
+      "description": "Delete stored message text now (of one source, or older than a date). Message ids stay so nothing is read twice.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 7,
+            "maxLength": 40,
+            "pattern": "^src_[0-9A-HJKMNP-TV-Z]{26}$"
+          },
+          "before": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "purged"
+        ],
+        "properties": {
+          "purged": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000000
+          }
+        }
+      },
+      "crud": [
+        "update",
+        "delete"
+      ],
+      "effect": "destructive",
+      "holdFamily": "destructive",
+      "idempotency": "supported",
+      "receipt": true
     }
   ],
-  "skills": [{ "id": "use-observer", "title": "How to use Observer", "file": "skills/use-observer/SKILL.md" }],
-  "backups": { "schedule": "30 2 * * *", "retain": 7 },
-  "ui": { "launchPath": "/", "configurePath": "/configure" }
+  "companions": [
+    {
+      "product": "knowledge",
+      "operations": [
+        "areas_list",
+        "document_create",
+        "document_update"
+      ],
+      "crud": [
+        "read",
+        "create",
+        "update"
+      ],
+      "purpose": "Write classified records as Knowledge documents (drafts by default)."
+    },
+    {
+      "product": "kanban",
+      "operations": [
+        "projects_list",
+        "issue_create"
+      ],
+      "crud": [
+        "read",
+        "create"
+      ],
+      "purpose": "Turn requests found in your sources into issues in Observer's project."
+    },
+    {
+      "product": "inbox",
+      "operations": [
+        "inbox_ask",
+        "inbox_status"
+      ],
+      "crud": [
+        "read",
+        "create"
+      ],
+      "purpose": "Tell you when records wait for review or a message needs a person."
+    }
+  ],
+  "skills": [
+    {
+      "id": "use-observer",
+      "title": "How to work with Observer",
+      "file": "skills/use-observer/SKILL.md"
+    }
+  ],
+  "backups": {
+    "schedule": "30 3 * * *",
+    "retain": 3
+  },
+  "ui": {
+    "launchPath": "/",
+    "configurePath": "/configure"
+  }
 }
