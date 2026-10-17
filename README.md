@@ -92,6 +92,7 @@ This is the end of widening the secret net for this version; S6 tunes the false 
 - Keywords are recognised in English, Slovak, Czech and German; a key name in another language is found only by its value (a known key format, a high-entropy value after `=` / `:`, or the suspect check below).
 - Over-redaction is the safe side: after an explicit `:` or `=` the whole rest of the line is removed.
 - A record over 256 KiB (or with more than 2000 messages) is not scanned across messages; it is held for review as suspect instead.
+- In a record with more than 200 messages, the seam check between two messages looks at 512 characters on each side (4096 below that), to stay inside the time budget.
 - The suspect check is deliberately sensitive and has false positives: long random-looking identifiers, hex strings of 32+ characters without a hash word next to them, base64 data, tokens written in code-like groups. A flagged record is only held for review, never lost. It does not look at tokens shorter than 16 characters, at secrets written in words, or inside images and attachments (Observer stores no attachments).
 - URLs are taken apart (userinfo, every path segment, query, fragment); a slug made of plain words is safe, a path segment or query value that looks like a key is not.
 - Thread subjects and author handles are checked with the secret and suspect detectors only (not for email addresses or phone numbers: an author handle is metadata).
