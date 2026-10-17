@@ -208,6 +208,18 @@ describe("source_update", () => {
     await run("source_update", { id: src2, exclude: { senders: ["ÄRGER@Beispiel.de"] } }, O());
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages WHERE source_id = ?").get(src2)?.c, 0);
   });
+  it("excluding an email also hides its '+tag' and dotted forms (and googlemail); another address or domain stays", async () => {
+    const src = seedSource(db);
+    for (const [id, who] of [["tag", "email:john.smith+news@gmail.com"], ["dots", "email:j.o.h.n.smith@googlemail.com"], ["plain", "email:johnsmith@gmail.com"], ["other", "email:john@gmail.com"], ["slack", "slack:johnsmith@gmail.com"]] as const) {
+      seedMessage(db, src, { id, author: who });
+    }
+    await run("source_update", { id: src, exclude: { senders: ["johnsmith@gmail.com"], domains: [] } }, O());
+    assert.deepEqual(
+      db.prepare("SELECT provider_msg_id AS id FROM obs_messages ORDER BY 1").all().map((r) => r.id),
+      ["other"],
+      "a bare address fits every channel; only john@gmail.com is a different mailbox",
+    );
+  });
   it("no text of an excluded sender survives anywhere: messages, records, deliveries (unsent deleted, sent emptied), flags", async () => {
     const src = seedSource(db);
     const SECRET = "ANNA-PRIVATE-WORDS";

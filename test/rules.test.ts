@@ -119,3 +119,25 @@ describe("rule_delete and rules_reorder", () => {
     assert.deepEqual(await ids(), before);
   });
 });
+
+describe("rule words", () => {
+  it("rule_put refuses empty words, '*' and stems under 3 letters (rule_word_invalid, 400) and stores nothing", async () => {
+    for (const bad of [[""], ["   "], ["*"], ["ab*"], ["ok", "*"], ["x*"], ["*ab"], ["fine", "co*"]]) {
+      await rejects(run("rule_put", { position: 1, match: { words: bad }, action: KB }, O()), "rule_word_invalid", 400);
+    }
+    assert.deepEqual(await ids(), [RULE_ZERO_ID]);
+  });
+  it("quiet on good: words, stems of 3+ letters, phrases and suffixes are stored; a rule without words is fine", async () => {
+    for (const words of [["invoice"], ["inv*"], ["sick leave"], ["*krebs"], ["a"], ["faktúr*", "platba"]]) {
+      assert.ok((await run("rule_put", { position: 1, match: { words }, action: KB }, O())).rule.id, JSON.stringify(words));
+    }
+    assert.ok((await run("rule_put", { position: 1, match: {}, action: KB }, O())).rule.id);
+  });
+  it("a rule whose words are all unusable (stored before the check existed) matches nothing instead of everything", async () => {
+    const { matches } = await import("../src/router.ts");
+    const f = { source: "s", conversations: [], authors: [], text: "any text at all", classes: {}, secret: false, actionable: false, words: 4 };
+    assert.equal(matches({ words: ["*"] }, f), false);
+    assert.equal(matches({ words: ["ab*", ""] }, f), false);
+    assert.equal(matches({ words: ["ab*", "text"] }, f), true, "the usable word still works");
+  });
+});

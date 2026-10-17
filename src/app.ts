@@ -49,6 +49,7 @@ import {
 } from "#kit";
 import { now, setClock } from "./clock.ts";
 import { connectPort, requireConnect } from "./connect.ts";
+import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
 import { manifest, migrationsDir } from "./manifest.ts";
 import {
@@ -337,6 +338,9 @@ export const handlers = {
   [OP.rulePut]: op<RulePutInput, unknown>({
     redact: (i) => `${i.id ? "change" : "add"} rule at ${i.position}`,
     async run(i, ctx) {
+      // a word list entry that is empty, "*" or a stem under 3 letters would match (almost) everything or nothing
+      const bad = invalidWordEntries(i.match.words ?? []);
+      if (bad.length > 0) throw new TbError("rule_word_invalid", `unusable word in the rule: ${JSON.stringify(bad[0])} (not empty, not "*", stems at least 3 letters)`, 400);
       return { rule: putRule(ctx.db, i, now()) };
     },
   }),

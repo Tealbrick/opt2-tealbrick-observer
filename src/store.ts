@@ -7,6 +7,8 @@ import { createHash, createHmac } from "node:crypto";
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { type ClassifyConfig, classifyText } from "./classify.ts";
+import { validWordEntry } from "./detect/words.ts";
 
 export type Row = Record<string, unknown>;
 
@@ -313,13 +315,28 @@ export function authorKey(ref: string): string {
   return ref.normalize("NFC").toLowerCase();
 }
 const valuePart = (key: string): string => key.slice(key.indexOf(":") + 1);
-/** Does the exclusion list hide this author? `senders` match the whole handle or its value part, `domains` the part after "@". */
+/** An email as the mailbox sees it: no "+tag", no dots in the local part, googlemail = gmail. Other values are returned as they are. */
+export function emailCanonical(value: string): string {
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return value;
+  const local = (value.slice(0, at).split("+")[0] as string).replace(/\./g, "");
+  const domain = value.slice(at + 1);
+  return `${local}@${domain === "googlemail.com" ? "gmail.com" : domain}`;
+}
+/** Does the exclusion list hide this author? `senders` match the whole handle or its value part (email: "+tag" and dots ignored),
+ *  `domains` the part after "@". */
 export function isExcluded(key: string, ex: Exclude): boolean {
   const value = valuePart(key);
   const at = value.lastIndexOf("@");
+  const canon = emailCanonical(value);
+  const channel = key.includes(":") ? key.slice(0, key.indexOf(":")) : "";
   for (const s of ex.senders) {
     const k = authorKey(s);
-    if (key === k || value === k) return true;
+    // "email:anna@x.com" names a channel and must be that channel; a bare "anna@x.com" fits any (email "+tag" and dots ignored)
+    const kChannel = k.includes(":") ? k.slice(0, k.indexOf(":")) : null;
+    if (kChannel !== null && kChannel !== channel) continue;
+    const kv = valuePart(k);
+    if (key === k || value === kv || (kv.includes("@") && canon === emailCanonical(kv))) return true;
   }
   if (at >= 0) {
     const domain = value.slice(at + 1);
@@ -449,6 +466,8 @@ export interface RecordView {
   state: string;
   pii: Record<string, number>;
   secret: boolean;
+  /** a token in the text looks like a secret (suspect_secret): held for the owner, shown as "possible secret" */
+  possibleSecret: boolean;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;
@@ -469,6 +488,7 @@ export function recordView(r: Row): RecordView {
     state: str(r.state),
     pii: parsePii(r.pii_json),
     secret: Number(r.secret) === 1,
+    possibleSecret: (parsePii(r.pii_json).suspect_secret ?? 0) > 0,
     ruleId: strOrNull(r.rule_id),
     actionable: Number(r.actionable) === 1,
     decidedBy: strOrNull(r.decided_by),
@@ -478,6 +498,8 @@ export function recordView(r: Row): RecordView {
     updatedAt: iso(r.updated_at),
   };
 }
+/** Characters of message text that one recordDetail call will classify (2 MiB); messages beyond it are shown without spans. */
+export const SPAN_BUDGET_CHARS = 2 * 1024 * 1024;
 export interface MessageView {
   conversation: string;
   id: string;
@@ -489,28 +511,54 @@ export interface MessageView {
   authorKind: string;
   /** null once purged, after the record's text_purge_at, or when the provider deleted the message */
   text: string | null;
+  /** detected sensitive spans in `text`: classes and offsets only (never the matched value); [] when there is no text */
+  spans: { class: string; start: number; end: number }[];
 }
 /** Record with its messages (person ops only). Text is shown only while inside retention. */
-export function recordDetail(db: Db, r: Row, now: number): RecordView & { messages: MessageView[]; spans: never[] } {
+export function recordDetail(db: Db, r: Row, now: number): RecordView & { messages: MessageView[] } {
   const purgeAt = r.text_purge_at === null || r.text_purge_at === undefined ? null : Number(r.text_purge_at);
   const expired = purgeAt !== null && purgeAt <= now;
   const msgs = db.prepare("SELECT * FROM obs_messages WHERE record_id = ? ORDER BY sent_at, provider_msg_id LIMIT 500").all(str(r.id));
+  const cfg = loadClassifierConfig(db);
+  let budget = SPAN_BUDGET_CHARS; // classification work per call: a record of many large messages must not stall the UI
   return {
     ...recordView(r),
-    messages: msgs.map((m) => ({
-      conversation: str(m.conversation),
-      id: str(m.provider_msg_id),
-      thread: strOrNull(m.thread),
-      sentAt: iso(m.sent_at),
-      editedAt: iso(m.edited_at),
-      deleted: Number(m.deleted) === 1,
-      author: str(m.author_ref),
-      authorKind: str(m.author_kind),
-      text: expired || Number(m.deleted) === 1 || m.text === null ? null : str(m.text),
-    })),
-    // TODO(S3): detected PII spans (offsets + class) once the deterministic detectors exist.
-    spans: [],
+    messages: msgs.map((m) => {
+      const text = expired || Number(m.deleted) === 1 || m.text === null ? null : str(m.text);
+      const inBudget = text !== null && text.length <= budget;
+      if (text !== null) budget -= text.length;
+      return {
+        conversation: str(m.conversation),
+        id: str(m.provider_msg_id),
+        thread: strOrNull(m.thread),
+        sentAt: iso(m.sent_at),
+        editedAt: iso(m.edited_at),
+        deleted: Number(m.deleted) === 1,
+        author: str(m.author_ref),
+        authorKind: str(m.author_kind),
+        text,
+        // owner view only (review_get / record_get): where the detectors found something, never what
+        spans: text === null || !inBudget ? [] : classifyText(text, cfg).spans.map((s) => ({ class: s.class, start: s.start, end: s.end })),
+      };
+    }),
   };
+}
+
+/** Classifier settings (obs_settings): `gov_id_countries` (JSON list, default SK, CZ, DE, US), `actionable_words` (JSON list). */
+export function loadClassifierConfig(db: Db): ClassifyConfig {
+  const list = (key: string): string[] | undefined => {
+    const v = getSetting(db, key);
+    if (v === null) return undefined;
+    try {
+      const a: unknown = JSON.parse(v);
+      return Array.isArray(a) ? a.filter((x): x is string => typeof x === "string") : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const gov = list("gov_id_countries");
+  const own = list("actionable_words")?.filter(validWordEntry); // an unusable entry (empty, "*", a short stem) is dropped
+  return { ...(gov ? { govCountries: gov } : {}), ...(own ? { ownerWords: own } : {}) };
 }
 
 /** Records waiting for the owner (C86 canvas badge). */
@@ -561,6 +609,8 @@ export interface DeliveryView {
   updatedAt: string | null;
   /** e.g. "may_duplicate: …", kept on the row (set by a retry after 23 h) */
   warning: string | null;
+  /** the record went back to Review after this row was written: it must not be sent */
+  superseded: boolean;
 }
 /** The stored input (`input_json`) is NOT part of the view: from S4 it holds the text that is sent. */
 export function deliveryView(r: Row): DeliveryView {
@@ -578,6 +628,7 @@ export function deliveryView(r: Row): DeliveryView {
     createdAt: iso(r.created_at),
     updatedAt: iso(r.updated_at),
     warning: strOrNull(r.warning),
+    superseded: Number(r.superseded) === 1,
   };
 }
 export function deliveryRow(db: Db, id: string): Row | undefined {
@@ -597,17 +648,6 @@ export function isSecretRecord(r: Row): boolean {
   } catch {
     return true;
   }
-}
-
-/**
- * The router's FIRST step (S3 builds the rest): a secret record is dropped by rule 0 before any rule is looked at, so no rule
- * the owner writes (also a catch-all one) can ever deliver it. `matches` is S3's rule matcher; it is not called for a secret.
- */
-export type Route = { kind: "drop"; ruleId: string; reason: "secret" } | { kind: "rule"; ruleId: string } | { kind: "review" };
-export function routeRecord(record: Row, rules: readonly RuleView[], matches: (rule: RuleView, record: Row) => boolean): Route {
-  if (isSecretRecord(record)) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
-  const hit = rules.find((rule) => rule.id !== RULE_ZERO_ID && matches(rule, record));
-  return hit ? { kind: "rule", ruleId: hit.id } : { kind: "review" };
 }
 
 export type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";
@@ -683,13 +723,32 @@ export function decideRecord(
         const attempted = existing.first_attempt_at !== null && existing.first_attempt_at !== undefined;
         db.prepare(
           `UPDATE obs_deliveries SET input_json = ?, status = 'pending', attempts = 0, hold_id = NULL, next_at = NULL, first_attempt_at = NULL,
-             last_error = NULL, warning = ?, idem_key = ?, updated_at = ? WHERE id = ?`,
+             last_error = NULL, warning = ?, superseded = 0, idem_key = ?, updated_at = ? WHERE id = ?`,
         ).run(input, attempted ? MAY_DUPLICATE_AFTER_REDECIDE : null, attempted ? deliveryKey(id, revision, dest, now) : str(existing.idem_key), now, str(existing.id));
       }
       db.prepare("UPDATE obs_records SET state = 'approved', decided_by = ?, decided_at = ?, decided_destination = ?, text_purge_at = ?, updated_at = ? WHERE id = ?").run(by, now, dest, purgeAt, now, id);
     }
     db.prepare("UPDATE obs_flags SET closed_at = ? WHERE record_id = ? AND closed_at IS NULL").run(now, id);
   });
+}
+
+/** A held (or any unsent) delivery row of a record that goes back to Review is marked superseded: it may still be approved in Holds, but it must never be sent. */
+export function supersedeHeld(db: Db, recordId: string): void {
+  db.prepare("UPDATE obs_deliveries SET superseded = 1 WHERE record_id = ? AND status IN ('held', 'pending')").run(recordId);
+}
+
+/**
+ * The one question S4 asks before it sends a row (also right after a hold is approved): is this delivery still what the owner decided?
+ * Only a row of the owner's LAST decision (record approved, same revision, same destination), not superseded, of a record that is not a
+ * secret record. A record in Review can never send anything.
+ * TODO(S4): call this immediately before the companion call and after every hold approval.
+ */
+export function deliverySendable(db: Db, deliveryId: string): boolean {
+  const d = deliveryRow(db, deliveryId);
+  if (!d || Number(d.superseded) === 1 || !["pending", "held"].includes(str(d.status))) return false;
+  const rec = recordRow(db, str(d.record_id));
+  if (!rec || isSecretRecord(rec)) return false;
+  return str(rec.state) === "approved" && Number(rec.revision) === Number(d.revision) && strOrNull(rec.decided_destination) === str(d.destination);
 }
 
 /** Does this record have a delivery Observer sent? (a `keep` makes sense only then) */
@@ -761,6 +820,7 @@ export function addFlag(db: Db, recordId: string, by: { type: string; id: string
   db.transaction(() => {
     db.prepare("INSERT INTO obs_flags (id, record_id, by_type, by_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(id, recordId, by.type, by.id, reason, now);
     db.prepare("UPDATE obs_records SET state = 'review', revision = revision + 1, decided_by = NULL, decided_at = NULL, decided_destination = NULL, updated_at = ? WHERE id = ?").run(now, recordId);
+    supersedeHeld(db, recordId);
   });
   return id;
 }
