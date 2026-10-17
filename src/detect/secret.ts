@@ -100,8 +100,8 @@ const KEY_ASSIGN = new RegExp(`(?<![\\w.-])[\\w.-]{0,64}?(?:${KEYWORDS})${SUFFIX
 const KEY_PROSE = /(?<![\p{L}\p{N}_])(?:pass(?:word|wd|phrase)?|pwd|tokens?|api[ _-]?key|(?:client[ _-]?)?secret|private[ _-]?key|hesl[oa]|passwort|kennwort|zugangscode)["']?(?:[ \t]+(?:for|pro|fur|fuer)[ \t]+[\w.@-]{1,30})?\s+(?:is|je|ist|lautet|was|bol)\s+["']?([^\s"',;)]{4,})/giu;
 const SQL = /\b(?:IDENTIFIED[ \t]+BY|PASSWORD(?:[ \t]*=)?|PASSWORD[ \t]*\()[ \t]*(['"])[^'"\n]{1,200}\1\)?/gi;
 const FLAG = /(?<![\w-])-{1,2}(?:password|passwd|pass|pwd|pw|token|api[-_]?key|apikey|secret|client[-_]?secret|storepass|keypass|passin|passout|access[-_]?token|auth[-_]?token|private[-_]?key)[ \t]+(?:pass:|env:|file:)?(?:"[^"\n]*"|'[^'\n]*'|[^\s]+)/gi;
-const DASH_P = /\b(?:mysql\w*|mariadb|sshpass|psql|mongo\w*|redis-cli)\b[^\n]*?[ \t](-p[ \t]?(?:"[^"\n]*"|'[^'\n]*'|[^\s]+))/gi;
-const SEVEN_Z = /\b7za?\b[^\n]*?[ \t](-p(?:"[^"\n]*"|'[^'\n]*'|[^\s-][^\s]*))/gi;
+const DASH_P = /\b(?:mysql\w*|mariadb|sshpass|psql|mongo\w*|redis-cli)\b[^\n]{0,200}?[ \t](-p[ \t]?(?:"[^"\n]*"|'[^'\n]*'|[^\s]+))/gi;
+const SEVEN_Z = /\b7za?\b[^\n]{0,200}?[ \t](-p(?:"[^"\n]*"|'[^'\n]*'|[^\s-][^\s]*))/gi;
 const ENTROPY_CANDIDATE = /[:=][ \t]*["'`]?([A-Za-z0-9+/_.~=-]{20,})/g;
 const B64_CANDIDATE = /(?<![A-Za-z0-9+/_=-])[A-Za-z0-9+/_-]{16,}={0,2}(?![A-Za-z0-9+/_=-])/g;
 

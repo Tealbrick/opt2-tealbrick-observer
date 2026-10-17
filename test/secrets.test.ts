@@ -4,9 +4,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { detectAll, redactText } from "../src/detect/index.ts";
 import { detectSecrets } from "../src/detect/secret.ts";
-import { detectSuspect } from "../src/detect/suspect.ts";
+import { detectSuspect, suspectToken } from "../src/detect/suspect.ts";
 import type { Detection } from "../src/detect/types.ts";
-import { joinedSecretScan, MAX_SCANNED_MESSAGES } from "../src/records.ts";
+import { joinedScan, joinedSecretScan, MAX_SCANNED_MESSAGES } from "../src/records.ts";
 
 const j = (...p: string[]) => p.join("");
 const rep = (s: string, n: number) => s.repeat(n);
@@ -243,3 +243,130 @@ describe("the 64 K window boundary", () => {
     assert.ok(last && last.end >= text.length - 8, "reaches the end of the text");
   });
 });
+
+// ── round 4: the suspect fail-safe, shape by shape ─────────────────────────────────────────────
+describe("suspect_secret: URLs have no blanket exemption", () => {
+  const T = j("k8Jd92LmQx", "7PzVb3TnYc", "8WsDuR4"); // 27 random-looking characters, built at run time
+  const hit = (text: string): string[] => found(text, detectSuspect(text));
+  it("a token in a path segment, a query value, the #fragment or the userinfo (with or without a colon) is suspect", () => {
+    assert.deepEqual(hit(`open https://example.com/api/v2/${T}/items now`), [T]);
+    assert.deepEqual(hit(`open https://example.com/cb?state=${T}&x=1`), [T]);
+    assert.deepEqual(hit(`open https://example.com/cb#access_token=${T}`), [T]);
+    assert.deepEqual(hit(`git clone https://${T}@github.com/org/repo.git`), [T]);
+    assert.deepEqual(hit(`git clone https://bob:${T}@github.com/org/repo.git`), [T]);
+    assert.deepEqual(hit(`ftp://${T}:x@host/dir`), [T]);
+  });
+  it("the known webhook paths are suspect as a whole: Discord, Slack, Outlook / Teams", () => {
+    for (const u of [
+      j("https://discord.com/api/webhooks/123456789012345678/", "abcdefg-hijklmn"),
+      j("https://discordapp.com/api/v9/webhooks/123/", "short"),
+      "https://outlook.office.com/webhook/abc/IncomingWebhook/def",
+      "https://contoso.webhook.office.com/webhookb2/abc",
+      j("https://hooks.slack", ".com/services/T0/B0/x"),
+    ]) assert.deepEqual(hit(`post to ${u} please`), [u], u);
+  });
+  it("ordinary URLs stay quiet: slugs, repo paths, wiki search, ports, git@ user, plain query strings", () => {
+    const quiet = [
+      "https://example.com/docs/getting-started/installation-guide",
+      "https://en.wikipedia.org/wiki/Special:Search?q=hello+world",
+      "https://github.com/org/repo/pull/1234",
+      "ssh://git@github.com/org/repo.git",
+      "https://example.com:8080/a/b/c?page=2&sort=asc",
+      "https://example.com/Some/Long/Path_Name/for-the-team",
+      "https://www.example.com/2026/10/17/our-quarterly-results-announcement/",
+    ];
+    for (const u of quiet) assert.deepEqual(hit(`see ${u} for details`), [], u);
+    assert.equal(detectSuspect(`see https://example.com/${T}`).count, 1, "control");
+  });
+});
+
+describe("suspect_secret: more shapes", () => {
+  const hit = (text: string): string[] => found(text, detectSuspect(text));
+  it("hex of 32+ characters (0x allowed) is suspect unless a hash word is within 40 characters", () => {
+    const h64 = hex(64);
+    const h32 = hex(32);
+    assert.deepEqual(hit(`the value is ${h64} ok`), [h64]);
+    assert.deepEqual(hit(`the value is ${h32}`), [h32]);
+    assert.deepEqual(hit(`key 0x${hex(40)}`), [`0x${hex(40)}`]);
+    for (const w of ["sha", "sha1", "sha256", "md5", "commit", "checksum", "digest", "hash", "revision", "rev", "etag", "SHA256", "Commit"]) {
+      assert.deepEqual(hit(`${w}: ${h64}`), [], `${w} before`);
+      assert.deepEqual(hit(`${h64} (${w})`), [], `${w} after`);
+    }
+    assert.equal(hit(`commit ${rep("x", 50)} ${h64}`).length, 1, "a hash word 40+ characters away does not count");
+    assert.deepEqual(hit(`shared ${h64}`), [h64], "'shared' is not the word 'sha'");
+  });
+  it("a UUID next to key / token / secret / api words is suspect; a plain id is not", () => {
+    const u = "123e4567-e89b-12d3-a456-426614174000";
+    assert.deepEqual(hit(`api key ${u}`), [u]);
+    assert.deepEqual(hit(`${u} is the secret`), [u]);
+    assert.deepEqual(hit(`token=${u}`), [u]);
+    assert.deepEqual(hit(`order id ${u}`), []);
+    assert.deepEqual(hit(`${rep("lorem ", 20)}key ${rep("ipsum ", 12)}${u}`), [], "the key word is too far away");
+  });
+  it("two-class tokens of 24+ characters with entropy >= 4.0, and 32+ letters of one case with entropy >= 4.0", () => {
+    const two = j("k8jd92lmqx", "7pzvb3tnyc", "8wsdur4a");
+    const letters = j("qzxjkvbnmw", "plrtyhgfds", "acuieoqzxjkv");
+    assert.equal(two.length, 28);
+    assert.equal(letters.length, 32);
+    assert.deepEqual(hit(`code ${two} ok`), [two]);
+    assert.deepEqual(hit(`code ${letters} ok`), [letters]);
+    assert.deepEqual(hit("supercalifragilisticexpialidocious and internationalization"), []);
+  });
+  it("tokens of 16–20 characters with 12+ different characters and 2+ classes, without an entropy floor", () => {
+    assert.deepEqual(hit("id a1b2c3d4e5f6a7b8 x"), ["a1b2c3d4e5f6a7b8"]);
+    assert.deepEqual(hit("id aaaa1111bbbb2222 x"), []);
+    assert.deepEqual(hit("id abcdefghijklmnop x"), [], "one class: a word-like run");
+  });
+  it("base32 (TOTP seeds): 32 characters anywhere, 16–31 next to otp / totp / 2fa / seed words", () => {
+    const b32 = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    const low = "JBSWY3DPJBSWY3DPJBSWY3DP"; // few different characters, so only the base32 rule can find it
+    assert.deepEqual(hit(`${b32}`), [b32]);
+    assert.deepEqual(hit(`totp seed: ${low.slice(0, 16)}`), [low.slice(0, 16)]);
+    assert.deepEqual(hit(`2FA ${low.slice(0, 20)}`), [low.slice(0, 20)]);
+    assert.deepEqual(hit(`authenticator ${low}`), [low]);
+    assert.deepEqual(hit(`ref ${low.slice(0, 16)}`), [], "no otp word, not 32 characters");
+    assert.deepEqual(hit("ABCDEFGHIJKLMNOPQRSTUVWXYZ ok"), [], "26 letters are not base32 of 16–32");
+  });
+  it("a token written in groups is judged collapsed; numbers in groups, words and IPv6 are not", () => {
+    assert.equal(hit("code: k8Jd 92Lm Qx7P zVb3 TnYc here").length, 1);
+    assert.equal(hit("code ab12.cd34.ef56.gh78.ij90 here").length, 1);
+    for (const t of ["the end of it all and some more words here", "call +421 911 123 456 789 now", "card 4111 1111 1111 1111", "ipv6 2001:0db8:85a3:0000:0000:8a2e:0370:7334", "version 1.2.3.4.5.6.7", "on 2026.10.17 12:30:45 sharp", "mail.example.com.au"]) {
+      assert.deepEqual(hit(t), [], t);
+    }
+  });
+  it("the UUID and ISO safe shapes match the WHOLE token (anchored)", () => {
+    assert.equal(suspectToken("123e4567-e89b-12d3-a456-426614174000"), false);
+    assert.equal(suspectToken("123e4567-e89b-12d3-a456-426614174000EXTRA9x"), true);
+    assert.equal(suspectToken("2026-10-17T12:30:45.123Z"), false);
+    assert.equal(suspectToken("2026-10-17-k8Jd92LmQx7PzVb3"), true);
+  });
+  it("words made of words are safe: slugs, snake_case and camelCase identifiers", () => {
+    for (const w of ["my-long-article-title-here", "snake_case_identifier_name", "getUserAccountBalanceFromDatabase", "GetUserAccountBalance", "installation-guide"]) assert.equal(suspectToken(w), false, w);
+    assert.equal(suspectToken("AbCdEfGhIjKlMnOpQr1"), true);
+  });
+});
+
+describe("the joined scan sees suspect tokens too", () => {
+  const T = j("k8Jd92LmQx", "7PzVb3TnYc", "8WsDuR4");
+  it("a token split over two messages is suspect when joined; neither half is", () => {
+    const a = `the code is ${T.slice(0, 12)}`;
+    const b = `${T.slice(12)} and thanks`;
+    assert.equal(detectSuspect(a).count + detectSuspect(b).count, 0);
+    const r = joinedScan([a, b]);
+    assert.deepEqual([r.secret, r.suspect, r.toolarge], [false, true, false]);
+    assert.equal(joinedScan(["lunch at noon", "sounds good"]).suspect, false);
+  });
+  it("2000 messages are scanned in under 500 ms (median of 5), 2001 are not scanned at all", () => {
+    const many = Array.from({ length: MAX_SCANNED_MESSAGES }, (_, i) => `message number ${i} about lunch plans and the schedule`);
+    const t: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      const s = performance.now();
+      joinedScan(many);
+      t.push(performance.now() - s);
+    }
+    t.sort((a, b) => a - b);
+    assert.ok((t[2] as number) < 500, `${t[2]} ms`);
+    assert.equal(joinedScan([...many, "one more"]).toolarge, true);
+  });
+});
+
