@@ -81,6 +81,8 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
   const rec = useLoad(async () => (await run("review_get", { id })).record as unknown as RecordDetail, [id]);
   const { busy, error, act } = useAct();
   const [redacted, setRedacted] = useState(false);
+  // a possible secret opens redacted; the original is shown only when the owner asks for it
+  const [revealed, setRevealed] = useState(false);
   const [readIt, setReadIt] = useState(false);
   const r = rec.data;
   const rule = r?.ruleId ? rules.find((x) => x.id === r.ruleId) : undefined;
@@ -96,14 +98,25 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
   const hasText = r.messages.some((m) => m.text !== null);
   const marked = r.messages.some((m) => m.spans.length > 0);
   const found = Object.entries(r.pii).filter(([, n]) => n > 0);
-  const needsRead = r.possibleSecret;
-  const canDeliver = hasText && !r.secret && destination !== "" && !busy && (!needsRead || readIt);
+  // a token that looks like a secret holds the record as a whole; when no span marks it, redacting replaces the whole text
+  const heldWhole = r.possibleSecret && !r.messages.some((m) => m.spans.some((s) => s.class === "suspect_secret"));
+  const showRedacted = r.possibleSecret ? !revealed : redacted;
+  // Knowledge is required: without it nothing can be delivered
+  const knowledgeMissing = !available("knowledge");
+  const canDeliver = hasText && !r.secret && destination !== "" && !knowledgeMissing && !busy;
+  // deliver as is of a possible secret needs the tick, and the tick needs the original text on screen
+  const canAsIs = canDeliver && (!r.possibleSecret || (revealed && readIt));
 
   const decide = (decision: "deliver" | "deliver_redacted" | "drop" | "keep") =>
     act(async () => {
       const toPlace = decision === "deliver" || decision === "deliver_redacted";
-      await run("review_decide", { recordId: r.id, decision, ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}) });
-      onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Follow it on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
+      await run("review_decide", {
+        recordId: r.id,
+        decision,
+        ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}),
+        ...(decision === "deliver" && r.possibleSecret ? { acknowledged: true } : {}),
+      });
+      onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Delivery starts in a later version: the record waits on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
     });
 
   return (
@@ -122,7 +135,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
       {r.possibleSecret ? (
         <Notice tone="needs-you" role="status">
           <span>
-            <strong>Possible secret: held for your review.</strong> A token in this text looks like a key or a password. Observer does not deliver it until you have read the text and decided.
+            <strong>Possible secret: held for your review.</strong> A token in this text looks like a key or a password. The text opens redacted. Observer does not deliver the original text until you have shown it, read it and said it is safe.
           </span>
         </Notice>
       ) : null}
@@ -146,7 +159,27 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
           </>
         ) : null}
       </dl>
-      {marked && hasText ? (
+      {heldWhole && hasText ? (
+        <Notice tone="neutral" role="status">
+          <span>
+            <strong>This record was held as a whole.</strong> Observer could not mark the part that looks like a secret. Deliver redacted replaces all of the text with [possible secret].
+          </span>
+        </Notice>
+      ) : null}
+      {r.possibleSecret && hasText ? (
+        <div className="tb-ctas">
+          <Button
+            size="sm"
+            onClick={() => {
+              setRevealed(!revealed);
+              setReadIt(false);
+            }}
+          >
+            {revealed ? "Hide the original text" : "Show the original text"}
+          </Button>
+        </div>
+      ) : null}
+      {!r.possibleSecret && marked && hasText ? (
         <Segmented
           label="Show the text"
           value={redacted ? "redacted" : "marked"}
@@ -161,7 +194,14 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
         {r.messages.length === 0 ? <p>This record has no messages.</p> : null}
         {r.messages.map((m) => (
           <p key={`${m.conversation}:${m.id}`}>
-            <b>{m.authorKind === "self" ? "You" : m.author}:</b> {m.text === null ? <em>{m.deleted ? "Deleted in the source." : "The text is gone."}</em> : <Marked text={m.text} spans={m.spans} redacted={redacted} />}
+            <b>{m.authorKind === "self" ? "You" : m.author || "Sender hidden"}:</b>{" "}
+            {m.text === null ? (
+              <em>{m.deleted ? "Deleted in the source." : "The text is gone."}</em>
+            ) : heldWhole && showRedacted ? (
+              <mark className="is-secret">{REDACTION_LABELS.suspect_secret}</mark>
+            ) : (
+              <Marked text={m.text} spans={m.spans} redacted={showRedacted} />
+            )}
           </p>
         ))}
       </div>
@@ -171,9 +211,9 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
         <p className="tb-hint">The text of this record is gone, so it can only be dropped.</p>
       ) : (
         <div className="tb-stack">
-          {destination === "" ? (
-            <Notice tone="neutral" role="status">
-              No place to deliver to is available now. You can still drop the record.
+          {knowledgeMissing ? (
+            <Notice tone="needs-you" role="status">
+              Knowledge is not available to Observer, so nothing can be delivered now. You can still drop the record.
             </Notice>
           ) : null}
           <div className="ob-dest">
@@ -189,18 +229,18 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
               options={DESTINATIONS.map((d) => ({ value: d.id, label: d.name, disabled: !available(d.id), ...(available(d.id) ? {} : { meta: "not available" }) }))}
             />
           </div>
-          {needsRead ? <Check checked={readIt} onChange={setReadIt} disabled={busy} title="I read the text above. The marked part is not a secret." body="Delivery stays off until you tick this." /> : null}
+          {r.possibleSecret ? <Check checked={readIt} onChange={setReadIt} disabled={busy || !revealed} title="I read the original text above. The marked part is not a secret." body={revealed ? "Deliver as is stays off until you tick this. Deliver redacted needs no tick." : "Show the original text first. Deliver redacted needs no tick."} /> : null}
         </div>
       )}
       <div className="tb-ctas">
-        {!r.secret && hasText && marked ? (
+        {!r.secret && hasText && (marked || r.possibleSecret) ? (
           <Button variant="primary" disabled={!canDeliver} onClick={() => void decide("deliver_redacted")}>
             Deliver redacted
           </Button>
         ) : null}
         {!r.secret && hasText ? (
-          <Button variant={marked ? "secondary" : "primary"} disabled={!canDeliver} onClick={() => void decide("deliver")}>
-            {marked ? "Deliver as is" : "Deliver"}
+          <Button variant={marked || r.possibleSecret ? "secondary" : "primary"} disabled={!canAsIs} onClick={() => void decide("deliver")}>
+            {marked || r.possibleSecret ? "Deliver as is" : "Deliver"}
           </Button>
         ) : null}
         {!r.secret && hasText && r.revision > 1 ? (
@@ -255,7 +295,10 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
 
   return (
     <section className="app-page" aria-label="Review">
-      <PageHead title="Review" lede="Records with personal data, a possible secret, or no matching route wait here. Nothing reaches Knowledge, Task Board or Operator Inbox until you decide." />
+      <PageHead title="Review" lede="Records with personal data, a possible secret, or no matching route wait here. Nothing is delivered before you decide." />
+      <Notice tone="neutral" role="status">
+        Delivery to Knowledge, Task Board and Inbox starts in a later version. A record you approve waits until then.
+      </Notice>
       <RequiredApps targets={d?.targets ?? null} />
       {message ? (
         <Notice tone="live" role="status">

@@ -14,7 +14,7 @@ describe("Activity", () => {
     reset();
     const m = await mount(h(await page(), {}));
     assert.equal(m.host.querySelector("h1")?.textContent, "Activity");
-    assert.deepEqual([...m.host.querySelectorAll("thead th")].map((t) => t.textContent), ["When", "Record", "Delivered to", "Status"]);
+    assert.deepEqual([...m.host.querySelectorAll("thead th")].map((t) => t.textContent), ["When", "Record", "Destination", "Status"]);
     const r = rows(m.host);
     assert.equal(r.length, 5);
     const status = (i: number) => [...(r[i]?.querySelectorAll("td:last-child .tb-tag") ?? [])].map((t) => t.textContent);
@@ -28,6 +28,8 @@ describe("Activity", () => {
     assert.match(cells(r[1] as Element)[2] ?? "", /Task Board/);
     assert.match(cells(r[2] as Element)[2] ?? "", /Operator Inbox/);
     assert.match(cells(r[3] as Element)[1] ?? "", /May duplicate an earlier copy\./);
+    assert.match(cells(r[2] as Element)[1] ?? "", /^Messages in Work inbox/, "a possible secret has no subject: its title is the source");
+    assert.match(m.host.textContent ?? "", /Delivery starts in a later version/);
     assert.doesNotMatch(m.host.textContent ?? "", /raw upstream text must never show/);
     assert.match(cells(r[1] as Element)[1] ?? "", /A record that is no longer listed|Messages in/);
     await m.unmount();
@@ -79,7 +81,7 @@ describe("Activity", () => {
     reset();
     stub.deliveries = [];
     const m = await mount(h(await page(), {}));
-    assert.match(m.host.querySelector(".tb-empty")?.textContent ?? "", /Nothing delivered yet/);
+    assert.match(m.host.querySelector(".tb-empty")?.textContent ?? "", /Nothing here yet/);
     await m.unmount();
     reset();
     stub.fail.deliveries_list = { status: 500, code: "internal" };

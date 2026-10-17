@@ -34,8 +34,9 @@ export function ActivityPage() {
   const [more, setMore] = useState<Delivery[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const list = useLoad(async () => {
-    const [deliveries, records] = await Promise.all([run("deliveries_list", filter === "all" ? {} : { status: filter }), run("records_list", {})]);
-    return { items: deliveries.items.map(asDelivery), next: deliveries.nextCursor, titles: new Map(records.items.map(asRecord).map((r) => [r.id, recordTitle(r, undefined)] as const)) };
+    const [deliveries, records, sources] = await Promise.all([run("deliveries_list", filter === "all" ? {} : { status: filter }), run("records_list", {}), run("sources_list", {})]);
+    const labels = new Map(sources.sources.map((s) => [s.id, s.label] as const));
+    return { items: deliveries.items.map(asDelivery), next: deliveries.nextCursor, titles: new Map(records.items.map(asRecord).map((r) => [r.id, recordTitle(r, labels.get(r.source))] as const)) };
   }, [filter]);
   const { busy, error, act } = useAct();
   const d = list.data;
@@ -62,7 +63,7 @@ export function ActivityPage() {
 
   return (
     <section className="app-page" aria-label="Activity">
-      <PageHead title="Activity" lede="What Observer delivered, and to where. Every delivery is keyed to its record, so a retry never makes a second copy.">
+      <PageHead title="Activity" lede="Records you approved, and where they go. Delivery starts in a later version, so rows wait until then. Every delivery is keyed to its record, so a retry never makes a second copy.">
         <div className="ob-filter">
           <span className="tb-label" id="ob-filter-label">
             Show
@@ -79,7 +80,7 @@ export function ActivityPage() {
           </p>
         )
       ) : items.length === 0 ? (
-        <EmptyState title={filter === "all" ? "Nothing delivered yet" : "No deliveries match"}>{filter === "all" ? "Records you approve in Review, and records a rule delivers, appear here." : "Pick another filter to see the rest."}</EmptyState>
+        <EmptyState title={filter === "all" ? "Nothing here yet" : "No deliveries match"}>{filter === "all" ? "Records you approve in Review, and records a rule routes, appear here." : "Pick another filter to see the rest."}</EmptyState>
       ) : (
         <>
           <Table className="ob-table" aria-label="Deliveries">
@@ -87,7 +88,7 @@ export function ActivityPage() {
               <tr>
                 <th>When</th>
                 <th>Record</th>
-                <th>Delivered to</th>
+                <th>Destination</th>
                 <th>Status</th>
               </tr>
             </thead>

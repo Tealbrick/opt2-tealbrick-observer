@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { useState } from "react";
-import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, flush, h, lastCall, looksLikeKey, mount, REC_BANK, reset, stub, within } from "./ui-harness.ts";
+import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, detailOf, flush, h, lastCall, looksLikeKey, mount, REC_BANK, REC_KEY, reset, stub, within } from "./ui-harness.ts";
 
 const ui = compileUi("review");
 type Review = typeof import("../src/ui/review.tsx");
@@ -36,7 +36,7 @@ describe("Review", () => {
     reset();
     const m = await mountReview();
     assert.equal(m.host.querySelector("h1")?.textContent, "Review");
-    assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent), ["Invoice question from M. Horak", "New API key for the booking system", "Deploy notes", "Messages in Clinic partners"]);
+    assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent), ["Invoice question from M. Horak", "Messages in Work inbox", "Deploy notes", "Messages in Clinic partners"]);
     const tags = (a: Element) => [...a.querySelectorAll(".tb-tag")].map((t) => t.textContent);
     assert.deepEqual(tags(rows(m.host)[0] as Element), ["bank account", "email address", "phone number"]);
     assert.deepEqual(tags(rows(m.host)[1] as Element), ["possible secret"]);
@@ -87,8 +87,8 @@ describe("Review", () => {
     const c = lastCall("review_decide");
     assert.deepEqual(c.input, { recordId: "rec_bank", decision: "deliver_redacted", destination: "knowledge" });
     assertWriteHeaders(c);
-    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. Follow it on the Activity page\./);
-    assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent?.slice(0, 8)), ["New API ", "Deploy n", "Messages"]);
+    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. Delivery starts in a later version: the record waits on the Activity page\./);
+    assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent?.slice(0, 8)), ["Messages", "Deploy n", "Messages"]);
     assert.deepEqual(m.opened.at(-1), "rec_key", "the next record is opened");
     await m.unmount();
   });
@@ -120,31 +120,107 @@ describe("Review", () => {
     reset();
     stub.targets = [];
     const none = await mountReview();
-    assert.match(none.host.textContent ?? "", /Observer needs Connect and Knowledge to work\. Connect and Knowledge are not available to it now\./);
-    assert.match(detail(none.host).textContent ?? "", /No place to deliver to is available now\. You can still drop the record\./);
+    assert.match(none.host.textContent ?? "", /Observer needs Connect and Knowledge to work\. Connect and Knowledge are not available to it now\. Task Board/);
+    assert.match(detail(none.host).textContent ?? "", /Knowledge is not available to Observer, so nothing can be delivered now\. You can still drop the record\./);
     assert.ok(control(detail(none.host), "Deliver redacted").disabled);
     assert.ok(!control(detail(none.host), "Drop").disabled);
     await none.unmount();
   });
 
-  it("a possible secret is held: the text is shown and delivery stays off until the owner says they read it", async () => {
+  it("a possible secret opens redacted, without subject or sender; the original is shown only on purpose", async () => {
     reset();
     const m = await mountReview("rec_key");
     const d = detail(m.host);
+    assert.equal(d.querySelector("h2")?.textContent, "Messages in Work inbox", "no thread subject in the heading");
     assert.match(d.textContent ?? "", /Possible secret: held for your review\./);
     assert.match(d.textContent ?? "", /Route.*Held for your review, whatever the rules say/);
-    assert.ok((d.textContent ?? "").includes(looksLikeKey()), "the owner sees the text before any delivery");
-    assert.ok(control(d, "Deliver redacted").disabled);
-    assert.ok(control(d, "Deliver as is").disabled);
-    await click(control(d, "Deliver redacted"));
-    assert.equal(callsOf("review_decide").length, 0, "a disabled button sends nothing");
-    const tick = d.querySelector('.tb-check input[type="checkbox"]') as HTMLInputElement;
-    assert.match(d.querySelector(".tb-check")?.textContent ?? "", /I read the text above\. The marked part is not a secret\./);
-    await click(tick);
+    assert.match(d.textContent ?? "", /Sender hidden: New key for the booking system: \[possible secret\]/);
+    assert.ok(!(m.host.textContent ?? "").includes(looksLikeKey()), "the token is not on the page");
+    await click(control(d, "Show the original text"));
+    assert.ok((d.textContent ?? "").includes(looksLikeKey()), "now the owner sees the original");
+    await click(control(d, "Hide the original text"));
+    assert.ok(!(d.textContent ?? "").includes(looksLikeKey()));
+    await m.unmount();
+  });
+
+  it("Deliver redacted of a possible secret needs no tick and sends no acknowledgement", async () => {
+    reset();
+    const m = await mountReview("rec_key");
+    const d = detail(m.host);
     assert.ok(!control(d, "Deliver redacted").disabled);
     await click(control(d, "Deliver redacted"));
     await flush();
     assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_key", decision: "deliver_redacted", destination: "knowledge" });
+    await m.unmount();
+  });
+
+  it("Deliver as is of a possible secret needs the original shown, the tick, and then sends acknowledged: true", async () => {
+    reset();
+    const m = await mountReview("rec_key");
+    const d = detail(m.host);
+    const tick = d.querySelector('.tb-check input[type="checkbox"]') as HTMLInputElement;
+    assert.match(d.querySelector(".tb-check")?.textContent ?? "", /I read the original text above\. The marked part is not a secret\./);
+    assert.ok(tick.disabled, "the tick is off while the original is hidden");
+    assert.ok(control(d, "Deliver as is").disabled);
+    await click(control(d, "Show the original text"));
+    assert.ok(!tick.disabled);
+    assert.ok(control(d, "Deliver as is").disabled, "showing it is not enough");
+    await click(tick);
+    assert.ok(!control(d, "Deliver as is").disabled);
+    // hiding the original takes the tick back
+    await click(control(d, "Hide the original text"));
+    assert.ok(tick.disabled && control(d, "Deliver as is").disabled);
+    await click(control(d, "Show the original text"));
+    assert.ok(control(d, "Deliver as is").disabled, "the tick must be given again");
+    await click(tick);
+    await click(control(d, "Deliver as is"));
+    await flush();
+    const c = lastCall("review_decide");
+    assert.deepEqual(c.input, { recordId: "rec_key", decision: "deliver", destination: "knowledge", acknowledged: true });
+    assertWriteHeaders(c);
+    await m.unmount();
+  });
+
+  it("a possible secret with no marked span is held as a whole: redacting replaces all of the text", async () => {
+    reset();
+    stub.out.review_get = (i: Record<string, unknown>) => {
+      const d = detailOf(REC_KEY) as { messages: { spans: unknown[] }[] };
+      d.messages.forEach((x) => {
+        x.spans = [];
+      });
+      return { record: { ...d, id: i.id } };
+    };
+    const m = await mountReview("rec_key");
+    const d = detail(m.host);
+    assert.match(d.textContent ?? "", /This record was held as a whole\./);
+    assert.match(d.textContent ?? "", /Deliver redacted replaces all of the text with \[possible secret\]\./);
+    assert.deepEqual([...d.querySelectorAll(".ob-msgs mark")].map((x) => x.textContent), ["[possible secret]"]);
+    assert.ok(!(d.textContent ?? "").includes(looksLikeKey()));
+    assert.ok(!control(d, "Deliver redacted").disabled);
+    await click(control(d, "Show the original text"));
+    assert.ok((d.textContent ?? "").includes(looksLikeKey()));
+    await m.unmount();
+  });
+
+  it("Deliver is off while Knowledge, a required app, is missing, even when another destination is there", async () => {
+    reset();
+    stub.targets = ["connect", "kanban"];
+    const m = await mountReview();
+    const d = detail(m.host);
+    assert.match(d.textContent ?? "", /Knowledge is not available to Observer, so nothing can be delivered now\./);
+    assert.ok(control(d, "Deliver redacted").disabled);
+    assert.ok(control(d, "Deliver as is").disabled);
+    assert.ok(!control(d, "Drop").disabled);
+    await click(control(d, "Deliver redacted"));
+    assert.equal(callsOf("review_decide").length, 0);
+    await m.unmount();
+  });
+
+  it("says that delivery starts in a later version, and promises none now", async () => {
+    reset();
+    const m = await mountReview();
+    assert.match(m.host.textContent ?? "", /Delivery to Knowledge, Task Board and Inbox starts in a later version\./);
+    assert.doesNotMatch(m.host.textContent ?? "", /Nothing reaches Knowledge/);
     await m.unmount();
   });
 

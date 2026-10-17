@@ -27,7 +27,7 @@ describe("App", () => {
     const { App } = await ui<AppModule>("App.js");
     const m = await mount(h(App, {}));
     assert.equal(m.host.querySelector(".app-page h1")?.textContent, "Review");
-    assert.equal(m.host.querySelector('[aria-label="Record"] h2')?.textContent, "New API key for the booking system");
+    assert.equal(m.host.querySelector('[aria-label="Record"] h2')?.textContent, "Messages in Work inbox");
     await m.unmount();
     at("");
   });

@@ -1,15 +1,15 @@
 // Settings: what Observer is connected to (Connect and Knowledge are required, Task Board and Operator Inbox are optional) and the plain
 // words about what it does with secrets and personal data. Nothing here is edited: the owner's choices live on Routing and Privacy.
-import { Tag } from "@opt2-tealbrick/ui";
+import { Notice, Tag } from "@opt2-tealbrick/ui";
 import { destinationName, run } from "./api.ts";
 import { LoadFailed, PageHead, RequiredApps, useLoad } from "./common.tsx";
 import { CONNECT_MISSING } from "./sources.tsx";
 
 const APPS = [
   { id: "connect", name: "Connect", required: true, why: "Observer reads your sources through Connect, with read access only." },
-  { id: "knowledge", name: "Knowledge", required: true, why: "Delivered records become Knowledge documents, as drafts unless a rule says published." },
-  { id: "kanban", name: destinationName("kanban"), required: false, why: "Requests found in your sources become issues in Observer’s project." },
-  { id: "inbox", name: destinationName("inbox"), required: false, why: "Observer tells you when records wait for review." },
+  { id: "knowledge", name: "Knowledge", required: true, why: "When delivery starts, approved records become Knowledge documents, as drafts unless a rule says published." },
+  { id: "kanban", name: destinationName("kanban"), required: false, why: "When delivery starts, requests found in your sources become issues in Observer’s project." },
+  { id: "inbox", name: destinationName("inbox"), required: false, why: "When delivery starts, Observer tells you when records wait for review." },
 ] as const;
 
 export function SettingsPage() {
@@ -22,6 +22,9 @@ export function SettingsPage() {
     <section className="app-page" aria-label="Settings">
       <PageHead title="Settings" lede="What Observer is connected to, and what it does with secrets and personal data." />
       {data.error ? <LoadFailed message={data.error} retrying={data.loading} onRetry={() => void data.reload()} /> : null}
+      <Notice tone="neutral" role="status">
+        Delivery to Knowledge, Task Board and Inbox starts in a later version.
+      </Notice>
       <RequiredApps targets={d?.targets ?? null} />
       <div className="cards">
         <article className="tb-card" aria-label="Connected apps">

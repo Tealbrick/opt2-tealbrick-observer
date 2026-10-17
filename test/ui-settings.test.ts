@@ -21,7 +21,8 @@ describe("Settings", () => {
     assert.deepEqual(app(m.host, "Knowledge"), ["required", "available"]);
     assert.deepEqual(app(m.host, "Task Board"), ["optional", "available"]);
     assert.deepEqual(app(m.host, "Operator Inbox"), ["optional", "available"]);
-    assert.equal(m.host.querySelector(".tb-notice"), null, "nothing is missing");
+    assert.ok(!m.host.querySelector(".tb-notice.needs-you"), "nothing is missing");
+    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /^Delivery to Knowledge, Task Board and Inbox starts in a later version\./);
     await m.unmount();
   });
 
@@ -35,8 +36,10 @@ describe("Settings", () => {
     const knowledge = [...m.host.querySelectorAll(".ob-apps li")][1]?.querySelectorAll(".tb-tag")[1] as Element;
     assert.ok(knowledge.className.includes("needs-you"));
     assert.ok(![...m.host.querySelectorAll(".ob-apps li")][2]?.querySelectorAll(".tb-tag")[1]?.className.includes("needs-you"));
-    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /Observer needs Connect and Knowledge to work\. Knowledge is not available to it now\./);
-    assert.match(m.host.textContent ?? "", /Connect does not give Observer data access yet\. Sources start when it does\./);
+    const missing = m.host.querySelector(".tb-notice.needs-you")?.textContent ?? "";
+    assert.match(missing, /Observer needs Connect and Knowledge to work\. Knowledge is not available to it now\./);
+    assert.doesNotMatch(missing, /Portal/, "no Portal hint until Observer declares a Connect companion");
+    assert.match(m.host.textContent ?? "", /Observer cannot read sources yet\. Sources start when Connect gives Observer data access\./);
     await m.unmount();
   });
 

@@ -38,7 +38,7 @@ describe("Sources", () => {
     stub.sources = [];
     stub.jobs = [];
     const m = await mount(h(await page(), {}));
-    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /Connect does not give Observer data access yet\. Sources start when it does\./);
+    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /Observer cannot read sources yet\. Sources start when Connect gives Observer data access\./);
     assert.ok(control(m.host, "Add source").disabled);
     assert.match(m.host.querySelector(".tb-empty")?.textContent ?? "", /No sources yet/);
     assert.match(m.host.querySelector(".tb-empty")?.textContent ?? "", /Nothing is read/);
@@ -291,7 +291,7 @@ describe("Add source", () => {
     await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
     await next(dialog);
     await next(dialog, "Add source");
-    assert.deepEqual(alerts(dialog), ["Connect does not give Observer data access yet. Sources start when it does."]);
+    assert.deepEqual(alerts(dialog), ["Observer cannot read sources yet. Sources start when Connect gives Observer data access."]);
     assert.ok(control(dialog, "Add source"), "still on step 3");
     assert.equal(callsOf("backfill_start").length, 0);
     await m.unmount();

@@ -8,7 +8,7 @@ import { ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useAct, use
 import { HistoryDialog } from "./history.tsx";
 
 /** The sentence the owner reads while Connect cannot be used (the agreed wording). */
-export const CONNECT_MISSING = "Connect does not give Observer data access yet. Sources start when it does.";
+export const CONNECT_MISSING = "Observer cannot read sources yet. Sources start when Connect gives Observer data access.";
 
 type Tone = "live" | "busy" | "needs-you" | "idle";
 function liveStatus(job: Job | undefined, source: Source): { tone: Tone; text: string; hint: string } {
@@ -173,7 +173,7 @@ export function SourcesPage() {
       {d?.connectMissing ? (
         <Notice tone="needs-you" role="status">
           <span>
-            <strong>Connect does not give Observer data access yet.</strong> Sources start when it does.
+            <strong>Observer cannot read sources yet.</strong> Sources start when Connect gives Observer data access.
           </span>
         </Notice>
       ) : (

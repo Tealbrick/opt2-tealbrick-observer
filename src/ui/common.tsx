@@ -123,7 +123,7 @@ export function RequiredApps({ targets }: { targets: readonly string[] | null })
   return (
     <Notice tone="needs-you" role="status">
       <span>
-        <strong>Observer needs Connect and Knowledge to work.</strong> {missing.join(" and ")} {missing.length === 1 ? "is" : "are"} not available to it now. Give Observer access to {missing.length === 1 ? "it" : "them"} in Portal. Task Board and Operator Inbox are optional.
+        <strong>Observer needs Connect and Knowledge to work.</strong> {missing.join(" and ")} {missing.length === 1 ? "is" : "are"} not available to it now. Task Board and Operator Inbox are optional.
       </span>
     </Notice>
   );

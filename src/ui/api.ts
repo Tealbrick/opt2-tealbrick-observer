@@ -152,7 +152,7 @@ export function explain(e: unknown): string {
   const err = (e ?? {}) as { code?: unknown };
   switch (err.code) {
     case "connect_unavailable":
-      return "Connect does not give Observer data access yet. Sources start when it does.";
+      return "Observer cannot read sources yet. Sources start when Connect gives Observer data access.";
     case "account_not_shared":
       return "That account is not shared with Observer in Connect any more. Share it in Connect first.";
     case "conversation_unknown":
