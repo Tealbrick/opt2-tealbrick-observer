@@ -3,6 +3,8 @@
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { classifyRecord } from "./classify.ts";
+import { detectSecrets } from "./detect/secret.ts";
+import { purgeRecordText } from "./records.ts";
 import { type Route, type RouteFacts, routeFacts } from "./router.ts";
 import { DAY_MS, decideRecord, getPrivacy, listRules, loadClassifierConfig, notFound, type Row, recordRow } from "./store.ts";
 
@@ -16,13 +18,22 @@ export function applyRouting(db: Db, recordId: string, now: number): { route: Ro
     const cfg = loadClassifierConfig(db);
     const texts = msgs.map((m) => (m.text === null ? null : String(m.text)));
     const facts = classifyRecord(texts, cfg);
-    const hasText = texts.some((t) => t !== null);
-    const secret = facts.secret || Number(rec.secret) === 1;
+    // the record closes: look for a secret in the JOINED text too (one that was split over two messages, e.g. "password:" and then
+    // the value). A hit means a secret is stored in pieces: every message text of the record goes, ids / digests / the flag stay.
+    const joined = texts.filter((t): t is string => t !== null).join("\n");
+    const crossHit = joined.length > 0 && detectSecrets(joined).count > 0;
+    if (crossHit) {
+      purgeRecordText(db, recordId, now);
+      facts.classes.secret = Math.max(facts.classes.secret ?? 0, 1);
+      facts.secret = true;
+    }
+    const hasText = !crossHit && texts.some((t) => t !== null);
+    const secret = facts.secret || crossHit || Number(rec.secret) === 1;
     const rf: RouteFacts = {
       source: String(rec.source_id),
       conversations: [...new Set(msgs.map((m) => String(m.conversation)))],
       authors: [...new Set(msgs.map((m) => String(m.author_key)))],
-      text: texts.filter((t): t is string => t !== null).join("\n"),
+      text: crossHit ? "" : joined,
       classes: facts.classes,
       secret,
       actionable: facts.actionable,

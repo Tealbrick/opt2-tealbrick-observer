@@ -1,7 +1,9 @@
 // Windowing (DESIGN §4.3 step 2): messages group into records per thread. Pure functions with an injected clock.
 //   live      : a window closes after 30 minutes without a message, or 24 hours after its first message
 //   backfill  : windows close by a count / character budget (the v1 chunker); all backfill windows are closed
-// Messages without a thread form one stream per conversation and are split by the same quiet gap.
+// Messages without a thread form one stream per conversation and are split by the same quiet gap. A sent time in the future is
+// clamped to the arrival time and a NaN one is the arrival time, so one bad timestamp cannot hold a window open for ever.
+// Which RECORD a window belongs to is persisted in obs_messages.record_id (records.ts): late messages join the existing record.
 export const LIVE_QUIET_MS = 30 * 60_000;
 export const LIVE_MAX_MS = 24 * 3_600_000;
 export const BACKFILL_MAX_MESSAGES = 50;
@@ -11,7 +13,10 @@ export interface WindowMessage {
   id: string;
   conversation: string;
   thread: string | null;
+  /** when the provider says it was sent; a future time is clamped to the arrival time, a missing / NaN one IS the arrival time */
   sentAt: number;
+  /** when Observer read it (default: `now`) */
+  arrivedAt?: number;
   /** characters of text (the budget counts them) */
   chars: number;
 }
@@ -27,16 +32,26 @@ export interface MessageWindow {
   closed: boolean;
 }
 
-function streams(messages: readonly WindowMessage[]): WindowMessage[][] {
+/** The time a message counts at: its sent time, never later than it arrived; NaN / missing = the arrival time. */
+export function effectiveTime(m: WindowMessage, arrivedFallback: number): number {
+  const arrived = Number.isFinite(m.arrivedAt) ? (m.arrivedAt as number) : arrivedFallback;
+  return Number.isFinite(m.sentAt) ? Math.min(m.sentAt, arrived) : Number.isFinite(arrived) ? arrived : 0;
+}
+
+/** One stream per (conversation, thread), each sorted by time then id. Linear in the number of messages (plus the sorts). */
+function streams(messages: readonly WindowMessage[], arrivedFallback: number): WindowMessage[][] {
   const by = new Map<string, WindowMessage[]>();
-  for (const m of messages) {
+  for (const raw of messages) {
+    const m = { ...raw, sentAt: effectiveTime(raw, arrivedFallback) };
     const k = `${m.conversation}\u0000${m.thread ?? ""}`;
-    by.set(k, [...(by.get(k) ?? []), m]);
+    const list = by.get(k);
+    if (list) list.push(m);
+    else by.set(k, [m]);
   }
   return [...by.values()].map((s) => s.sort((a, b) => a.sentAt - b.sentAt || (a.id < b.id ? -1 : 1))).sort((a, b) => (a[0] as WindowMessage).sentAt - (b[0] as WindowMessage).sentAt);
 }
 const open = (m: WindowMessage): MessageWindow => ({
-  key: `${m.conversation}|${m.thread ?? ""}|${m.id}`,
+  key: `${m.conversation}\u0000${m.thread ?? ""}\u0000${m.id}`,
   conversation: m.conversation,
   thread: m.thread,
   start: m.sentAt,
@@ -61,7 +76,7 @@ export function liveWindows(messages: readonly WindowMessage[], now: number, opt
   const quiet = opts.quietMs ?? LIVE_QUIET_MS;
   const max = opts.maxMs ?? LIVE_MAX_MS;
   const out: MessageWindow[] = [];
-  for (const stream of streams(messages)) {
+  for (const stream of streams(messages, now)) {
     let cur: MessageWindow | null = null;
     for (const m of stream) {
       if (cur && m.sentAt - cur.end < quiet && m.sentAt - cur.start < max) add(cur, m);
@@ -76,6 +91,8 @@ export function liveWindows(messages: readonly WindowMessage[], now: number, opt
 }
 
 export interface BackfillOptions {
+  /** arrival time: the cap for sent times in the future and the time of a message with no usable sent time (default: no cap, 0) */
+  now?: number;
   maxMessages?: number;
   maxChars?: number;
   /** a gap longer than this splits a stream with no thread (default: the live quiet time) */
@@ -88,7 +105,7 @@ export function backfillWindows(messages: readonly WindowMessage[], opts: Backfi
   const maxChars = opts.maxChars ?? BACKFILL_MAX_CHARS;
   const quiet = opts.quietMs ?? LIVE_QUIET_MS;
   const out: MessageWindow[] = [];
-  for (const stream of streams(messages)) {
+  for (const stream of streams(messages, opts.now ?? Number.POSITIVE_INFINITY)) {
     let cur: MessageWindow | null = null;
     for (const m of stream) {
       const gap = m.thread === null && cur !== null && m.sentAt - cur.end >= quiet;

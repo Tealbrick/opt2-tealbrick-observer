@@ -8,6 +8,7 @@ import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { type ClassifyConfig, classifyText } from "./classify.ts";
+import { validWordEntry } from "./detect/words.ts";
 
 export type Row = Record<string, unknown>;
 
@@ -314,13 +315,28 @@ export function authorKey(ref: string): string {
   return ref.normalize("NFC").toLowerCase();
 }
 const valuePart = (key: string): string => key.slice(key.indexOf(":") + 1);
-/** Does the exclusion list hide this author? `senders` match the whole handle or its value part, `domains` the part after "@". */
+/** An email as the mailbox sees it: no "+tag", no dots in the local part, googlemail = gmail. Other values are returned as they are. */
+export function emailCanonical(value: string): string {
+  const at = value.lastIndexOf("@");
+  if (at <= 0) return value;
+  const local = (value.slice(0, at).split("+")[0] as string).replace(/\./g, "");
+  const domain = value.slice(at + 1);
+  return `${local}@${domain === "googlemail.com" ? "gmail.com" : domain}`;
+}
+/** Does the exclusion list hide this author? `senders` match the whole handle or its value part (email: "+tag" and dots ignored),
+ *  `domains` the part after "@". */
 export function isExcluded(key: string, ex: Exclude): boolean {
   const value = valuePart(key);
   const at = value.lastIndexOf("@");
+  const canon = emailCanonical(value);
+  const channel = key.includes(":") ? key.slice(0, key.indexOf(":")) : "";
   for (const s of ex.senders) {
     const k = authorKey(s);
-    if (key === k || value === k) return true;
+    // "email:anna@x.com" names a channel and must be that channel; a bare "anna@x.com" fits any (email "+tag" and dots ignored)
+    const kChannel = k.includes(":") ? k.slice(0, k.indexOf(":")) : null;
+    if (kChannel !== null && kChannel !== channel) continue;
+    const kv = valuePart(k);
+    if (key === k || value === kv || (kv.includes("@") && canon === emailCanonical(kv))) return true;
   }
   if (at >= 0) {
     const domain = value.slice(at + 1);
@@ -479,6 +495,8 @@ export function recordView(r: Row): RecordView {
     updatedAt: iso(r.updated_at),
   };
 }
+/** Characters of message text that one recordDetail call will classify (2 MiB); messages beyond it are shown without spans. */
+export const SPAN_BUDGET_CHARS = 2 * 1024 * 1024;
 export interface MessageView {
   conversation: string;
   id: string;
@@ -499,10 +517,13 @@ export function recordDetail(db: Db, r: Row, now: number): RecordView & { messag
   const expired = purgeAt !== null && purgeAt <= now;
   const msgs = db.prepare("SELECT * FROM obs_messages WHERE record_id = ? ORDER BY sent_at, provider_msg_id LIMIT 500").all(str(r.id));
   const cfg = loadClassifierConfig(db);
+  let budget = SPAN_BUDGET_CHARS; // classification work per call: a record of many large messages must not stall the UI
   return {
     ...recordView(r),
     messages: msgs.map((m) => {
       const text = expired || Number(m.deleted) === 1 || m.text === null ? null : str(m.text);
+      const inBudget = text !== null && text.length <= budget;
+      if (text !== null) budget -= text.length;
       return {
         conversation: str(m.conversation),
         id: str(m.provider_msg_id),
@@ -514,7 +535,7 @@ export function recordDetail(db: Db, r: Row, now: number): RecordView & { messag
         authorKind: str(m.author_kind),
         text,
         // owner view only (review_get / record_get): where the detectors found something, never what
-        spans: text === null ? [] : classifyText(text, cfg).spans.map((s) => ({ class: s.class, start: s.start, end: s.end })),
+        spans: text === null || !inBudget ? [] : classifyText(text, cfg).spans.map((s) => ({ class: s.class, start: s.start, end: s.end })),
       };
     }),
   };
@@ -533,7 +554,7 @@ export function loadClassifierConfig(db: Db): ClassifyConfig {
     }
   };
   const gov = list("gov_id_countries");
-  const own = list("actionable_words");
+  const own = list("actionable_words")?.filter(validWordEntry); // an unusable entry (empty, "*", a short stem) is dropped
   return { ...(gov ? { govCountries: gov } : {}), ...(own ? { ownerWords: own } : {}) };
 }
 

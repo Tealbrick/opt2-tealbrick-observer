@@ -2,7 +2,10 @@
 // Shared by the unit tests and by conformance.start.ts (fixed ids there, so tealbrick-conformance.json can name them).
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
+import { type IncomingMessage, storeMessage } from "../src/ingest.ts";
+import { attachWindow } from "../src/records.ts";
 import { authorKey } from "../src/store.ts";
+import { liveWindows } from "../src/window.ts";
 
 /** A valid 26-character ULID body that ends in `tag` (Crockford: no I, L, O, U). */
 export const fixedId = (prefix: string, tag: string): string => `${prefix}_01J${"0".repeat(23 - tag.length)}${tag}`;
@@ -132,4 +135,22 @@ export function seedConformance(db: Db): void {
   seedJob(db, src, { id: CONFORMANCE.job, kind: "live", state: "queued" });
   const rec = seedRecord(db, src, { id: CONFORMANCE.record, state: "delivered" });
   seedDelivery(db, rec, { id: fixedId("dlv", "C0NFD1V"), status: "sent", targetRef: "doc_conformance", key: "obs_conformance_fixture" });
+}
+
+/** Ingest texts the way S2 will: storeMessage for each (secrets cleaned, exclusions applied), then the window → record mapping.
+ *  Returns the record id (all texts end up in one window: they are one minute apart in one thread). */
+export function ingestRecord(db: Db, source: string, texts: string[], at: number, extra: Partial<IncomingMessage> = {}): string {
+  const ids: string[] = [];
+  for (const [i, text] of texts.entries()) {
+    const providerMsgId = `ing_${at}_${i}_${Math.random().toString(36).slice(2, 8)}`;
+    storeMessage(db, source, { conversation: "inbox", providerMsgId, thread: "t1", sentAt: at - 60_000 * (texts.length - i), author: "email:anna@example.com", authorKind: "person", text, ...extra }, at);
+    ids.push(providerMsgId);
+  }
+  const windows = liveWindows(
+    ids.map((id, i) => ({ id, conversation: "inbox", thread: "t1", sentAt: at - 60_000 * (texts.length - i), chars: 10 })),
+    at,
+  );
+  let record = "";
+  for (const w of windows) record = attachWindow(db, source, w, at).recordId;
+  return record;
 }

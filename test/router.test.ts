@@ -105,6 +105,23 @@ describe("routing", () => {
     assert.deepEqual(routeFacts(facts({ authors: ["email:x@spam.example"], classes: { email: 1 } }), [ZERO, drop]), { kind: "drop", ruleId: drop.id, reason: "rule" });
     assert.equal(routeFacts(facts(), [ZERO, rule({}, { deliver: "carrier-pigeon" })]).kind, "review");
   });
+  it("EVERY class except the secret counts as PII, also a class the detectors may add later; a class with count 0 does not", () => {
+    const r = rule({}, KB);
+    for (const cls of ["email", "phone", "iban", "card", "id", "address", "special", "future_class", "dob"]) {
+      assert.equal(routeFacts(facts({ classes: { [cls]: 1 } }), [ZERO, r]).kind, "review", cls);
+    }
+    assert.equal(routeFacts(facts({ classes: { email: 0 } }), [ZERO, r]).kind, "deliver", "a zero count is no PII");
+  });
+  it("a secret count in the classes is a secret even when the flag is false", () => {
+    assert.deepEqual(routeFacts(facts({ secret: false, classes: { secret: 2 } }), [ZERO, rule({}, KB)]), { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" });
+    assert.equal(routeFacts(facts({ secret: false, classes: { secret: 0 } }), [ZERO, rule({}, KB)]).kind, "deliver", "quiet on good: a zero count");
+  });
+  it("senders: email '+tag' and dots are ignored, googlemail is gmail, a channel prefix must be the same channel", () => {
+    const f = facts({ authors: ["email:john.smith+news@gmail.com"] });
+    for (const s of ["johnsmith@gmail.com", "John.Smith@Gmail.com", "j.o.h.n.smith+x@googlemail.com", "email:johnsmith@gmail.com", "john.smith+other@gmail.com"]) assert.equal(matches({ senders: [s] }, f), true, s);
+    for (const s of ["johnsmith@other.com", "john@gmail.com", "slack:johnsmith@gmail.com", "@other.com"]) assert.equal(matches({ senders: [s] }, f), false, s);
+    assert.equal(matches({ senders: ["@gmail.com"] }, f), true, "a domain entry still works");
+  });
   it("rule 0 is never matched as an owner rule: a record with PII but no secret ignores its match", () => {
     assert.equal(routeFacts(facts({ classes: { secret: 0 } }), [ZERO]).kind, "review");
   });
@@ -197,6 +214,13 @@ describe("applyRouting on the database", () => {
     const ssn2 = record(["number 123-45-6789"]);
     applyRouting(db, ssn2, now);
     assert.deepEqual(JSON.parse(String(row(ssn2).pii_json)), {});
+  });
+  it("unusable actionable_words (empty, '*', short stems) are ignored when the settings are read", async () => {
+    const { loadClassifierConfig } = await import("../src/store.ts");
+    db.prepare("INSERT INTO obs_settings (key, value) VALUES ('actionable_words', ?)").run(JSON.stringify(["*", "", "ab*", "renewal", "faktúr*"]));
+    assert.deepEqual(loadClassifierConfig(db).ownerWords, ["renewal", "faktúr*"]);
+    await put({ actionable: true }, { deliver: "inbox" });
+    assert.equal(applyRouting(db, record(["quarterly budget"]), now).route.kind, "review", "'*' alone does not make every text actionable");
   });
   it("only a record that is open or classified can be routed (record_state_invalid, 409); a missing one is not_found", () => {
     for (const state of ["review", "approved", "delivered", "dropped"]) {

@@ -32,7 +32,8 @@ describe("live windows", () => {
     assert.equal(w.length, 2);
     assert.equal(w[0]?.messageIds.length, 24 * 12, "first message to 23:55 later");
     assert.deepEqual([w[0]?.closed, w[1]?.closed], [true, false]);
-    assert.equal(w[0] && w[0].end - w[0].start < LIVE_MAX_MS, true);
+    assert.ok(w[0], "a first window exists");
+    assert.ok((w[0]?.end ?? 0) - (w[0]?.start ?? 0) < LIVE_MAX_MS, "a window is shorter than 24 h");
     // right at the 24 h mark the window is closed although the last message is only 5 minutes old
     assert.equal(liveWindows(talk.slice(0, 24 * 12), T0 + LIVE_MAX_MS)[0]?.closed, true);
     assert.equal(liveWindows(talk.slice(0, 24 * 12), T0 + LIVE_MAX_MS - 1)[0]?.closed, false);
@@ -53,7 +54,7 @@ describe("live windows", () => {
     const x = liveWindows([a, b], T0 + 3_600_000);
     const y = liveWindows([b, a], T0 + 3_600_000);
     assert.deepEqual(x, y);
-    assert.equal(x[0]?.key, `inbox|t1|${a.id}`);
+    assert.equal(x[0]?.key, `inbox\u0000t1\u0000${a.id}`);
     assert.equal(x[0]?.chars, 12);
     assert.deepEqual([x[0]?.start, x[0]?.end], [a.sentAt, b.sentAt]);
     assert.deepEqual(liveWindows([], T0), []);
@@ -78,5 +79,36 @@ describe("backfill windows", () => {
     assert.deepEqual(gap.map((x) => x.messageIds.length), [2, 1]);
     const threaded = backfillWindows([msg(0), msg(1), msg(500)]);
     assert.deepEqual(threaded.map((x) => x.messageIds.length), [3], "a thread is one conversation however long the pauses");
+  });
+});
+
+describe("bad times and big inputs", () => {
+  it("a sent time in the future counts as the arrival time: the window is not held open for ever", () => {
+    const future = msg(0, { sentAt: T0 + 10 * 86_400_000, arrivedAt: T0 });
+    const [w] = liveWindows([future], T0);
+    assert.deepEqual([w?.start, w?.end, w?.closed], [T0, T0, false]);
+    assert.equal(liveWindows([future], T0 + LIVE_QUIET_MS)[0]?.closed, true, "30 minutes after it arrived it is closed");
+    const noArrival = liveWindows([msg(0, { sentAt: T0 + 86_400_000 })], T0 + 100)[0];
+    assert.equal(noArrival?.end, T0 + 100, "without arrivedAt the clock's now is the cap");
+  });
+  it("NaN and missing sent times count as the arrival time", () => {
+    const nan = msg(0, { sentAt: Number.NaN, arrivedAt: T0 + 5 * MIN });
+    const none = { ...msg(0), sentAt: undefined as unknown as number, arrivedAt: T0 + 6 * MIN };
+    const w = liveWindows([nan, none], T0 + 10 * MIN);
+    assert.equal(w.length, 1);
+    assert.deepEqual([w[0]?.start, w[0]?.end], [T0 + 5 * MIN, T0 + 6 * MIN]);
+    assert.equal(backfillWindows([nan], { now: T0 + 20 * MIN })[0]?.start, T0 + 5 * MIN);
+    assert.equal(backfillWindows([{ ...nan, arrivedAt: undefined }], { now: T0 + 20 * MIN })[0]?.start, T0 + 20 * MIN);
+  });
+  it("backfill clamps a future time to the given arrival time and leaves a normal one alone", () => {
+    const [w] = backfillWindows([msg(0, { sentAt: T0 + 9e9 }), msg(1)], { now: T0 + 10 * MIN });
+    assert.deepEqual([w?.start, w?.end], [T0 + MIN, T0 + 10 * MIN]);
+  });
+  it("is linear: 100 000 messages in one thread group in well under a second", () => {
+    const big = Array.from({ length: 100_000 }, (_, i) => msg(i % 5000, { id: `b${i}`, thread: `t${i % 50}` }));
+    const t = performance.now();
+    const w = liveWindows(big, T0 + 9e9);
+    assert.ok(performance.now() - t < 1500, `${performance.now() - t} ms`);
+    assert.ok(w.length >= 50);
   });
 });

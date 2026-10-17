@@ -45,8 +45,9 @@ describe("a secret never reaches obs_messages.text", () => {
       for (const piece of [secret.slice(0, 20), secret.slice(-20), secret.split("\n")[1] ?? "~none~"]) assert.ok(!dump.includes(piece.replace(/\n/g, "\\n")) && !dump.includes(piece), `${name}: ${piece}`);
     }
     const texts = db.prepare("SELECT text FROM obs_messages").all().map((r) => String(r.text));
-    assert.ok(texts.every((t) => t.includes(SECRET_MARKER) && t.startsWith("before ") || t.includes(SECRET_MARKER)), "the marker tells the classifier a secret was here");
-    assert.ok(texts.some((t) => t === `before ${SECRET_MARKER} after`));
+    assert.equal(texts.length, Object.keys(SECRETS).length);
+    assert.ok(texts.every((t) => t.includes(SECRET_MARKER)), "the marker tells the classifier a secret was here");
+    assert.ok(texts.includes(`before ${SECRET_MARKER} after`), "the text around the secret is kept");
   });
   it("the text around a secret is kept; a text without a secret is stored as it is", () => {
     storeMessage(db, src, msg(`call me on Tuesday, key ${SECRETS.ghp} thanks`, { providerMsgId: "a" }));

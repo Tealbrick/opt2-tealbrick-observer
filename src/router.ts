@@ -4,7 +4,6 @@
 //   3. a rule that delivers a record holding PII (email, phone, bank account, card, id, address, special category) without
 //      `redact: true` sends the record to Review instead
 //   4. no rule matches → Review
-import { isPiiClass } from "./detect/types.ts";
 import { buildWordMatcher } from "./detect/words.ts";
 import type { RuleView } from "./store.ts";
 import { authorKey, isExcluded, normalizeExclude, RULE_ZERO_ID } from "./store.ts";
@@ -63,11 +62,12 @@ export function matches(match: Record<string, unknown>, f: RouteFacts): boolean 
   return true;
 }
 
-/** The PII classes (not the secret) a record holds. */
-export const piiClassesOf = (classes: Readonly<Record<string, number>>): string[] => Object.keys(classes).filter((c) => isPiiClass(c) && (classes[c] ?? 0) > 0);
+/** The PII classes a record holds: EVERY class with a count except the secret (a class the detectors add later counts too). */
+export const piiClassesOf = (classes: Readonly<Record<string, number>>): string[] => Object.keys(classes).filter((c) => c !== "secret" && (classes[c] ?? 0) > 0);
 
 export function routeFacts(f: RouteFacts, rules: readonly RuleView[]): Route {
-  if (f.secret) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
+  // the flag OR a secret count in the classes: either one is enough
+  if (f.secret || (f.classes.secret ?? 0) > 0) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
   for (const rule of [...rules].sort((a, b) => a.position - b.position)) {
     if (rule.id === RULE_ZERO_ID || !matches(rule.match, f)) continue;
     const deliver = String(rule.action.deliver);

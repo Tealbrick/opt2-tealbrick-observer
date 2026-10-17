@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { decideRecord, PAGE_SIZE } from "../src/store.ts";
+import { decideRecord, PAGE_SIZE, SPAN_BUDGET_CHARS } from "../src/store.ts";
 import { AGENT_A, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
@@ -79,6 +79,19 @@ describe("review_list, review_get, records_list, record_get", () => {
     const done = seedRecord(db, src, { state: "delivered" });
     await rejects(run("review_get", { id: done }, O()), "not_found", 404);
     await rejects(run("review_get", { id: "rec_01J00000000000000000000000" }, O()), "not_found", 404);
+  });
+  it("review_get classifies at most 2 MiB of text per call: later messages are shown without spans, and the call stays fast", async () => {
+    const rec = seedRecord(db, src, { state: "review" });
+    const body = `${"filler words go here ".repeat(700)}mail anna@example.com`; // about 15 KiB, one email at the end
+    const n = Math.ceil(SPAN_BUDGET_CHARS / body.length) + 20;
+    for (let i = 0; i < n; i++) seedMessage(db, src, { record: rec, id: `m${String(i).padStart(4, "0")}`, sentAt: Date.UTC(2026, 9, 2) + i, text: body });
+    const t = performance.now();
+    const out = (await run("review_get", { id: rec }, O())).record;
+    assert.ok(performance.now() - t < 2000, `${performance.now() - t} ms`);
+    const withSpans = out.messages.filter((m: Out) => m.spans.length > 0).length;
+    assert.ok(withSpans > 0 && withSpans < out.messages.length, `${withSpans} of ${out.messages.length}`);
+    assert.ok(out.messages.slice(0, withSpans).every((m: Out) => m.spans.length === 1), "the first messages have their span");
+    assert.ok(out.messages.slice(withSpans).every((m: Out) => m.spans.length === 0 && m.text === body), "the rest still show their text");
   });
   it("text shows only inside the retention: a purged text, a text past its purge time and a provider-deleted message read as null", async () => {
     const rec = seedRecord(db, src, { state: "delivered", textPurgeAt: now + DAY });

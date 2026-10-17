@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { ACTIONABLE_THRESHOLD, actionableScore, isActionable } from "../src/actionable.ts";
 import { classifyRecord, classifyText, countWords, SECRET_MARKER } from "../src/classify.ts";
+import { detectAddresses } from "../src/detect/address.ts";
+import { detectCards } from "../src/detect/card.ts";
+import { detectEmails } from "../src/detect/email.ts";
+import { detectGovIds } from "../src/detect/govid.ts";
+import { detectIbans } from "../src/detect/iban.ts";
 import { detectAll, LABELS, mergeSpans, redactText } from "../src/detect/index.ts";
+import { detectPhones } from "../src/detect/phone.ts";
+import { detectSecrets } from "../src/detect/secret.ts";
+import { detectSpecial } from "../src/detect/special.ts";
 
 describe("redaction", () => {
   it("replaces each class with its label", () => {
@@ -116,21 +124,42 @@ describe("time budget", () => {
   const prose =
     "Hi team, please send me the report by Friday. Anna (anna@example.com, +421 911 123 456) said the meeting at 10 Downing Street moved to 2026-10-17 12:30. Order 12345678 shipped; invoice 2026-0001234. The password is hunter2 and she has cancer. Costs: DE89 3704 0044 0532 0130 00, card 4111 1111 1111 1111, SSN 123-45-6789. Version 1.2.3.4 build 20261017 uuid 123e4567-e89b-12d3-a456-426614174000. ";
   const fill = (seed: string) => seed.repeat(Math.ceil(16384 / seed.length)).slice(0, 16384);
-  const median = (text: string): number => {
-    const runs: number[] = [];
-    for (let i = 0; i < 50; i++) {
-      const t = performance.now();
-      classifyText(text);
-      runs.push(performance.now() - t);
+  const median = (f: () => unknown, runs = 50): number => {
+    const t: number[] = [];
+    for (let i = 0; i < runs; i++) {
+      const s = performance.now();
+      f();
+      t.push(performance.now() - s);
     }
-    return runs.sort((a, b) => a - b)[25] as number;
+    return t.sort((a, b) => a - b)[Math.floor(runs / 2)] as number;
   };
-  it("classifies a 16 KiB message in under 20 ms (median of 50 runs), also on text shaped to hurt a regex", () => {
+  // shapes made to hurt a regex or a quadratic loop: long runs, nested repeats, many candidates, many separators, non-ASCII, format characters
+  const SHAPES = [
+    prose, "1234 5678 90 ", "12-34-56-78 ", "a@", "a.b@c.d ", "a@a@a@a@", "a.", "abcdefghij", "-----BEGIN X-----", "eyJabcdefgh.", "DE89 AB12 ", "lorem ipsum dolor sit amet cancer ",
+    "12 Foo Bar ", "((", "1/2/3/", "password: ", "key=value&", "=", ":a", "k=v\n", "0 0 0 0 ", "9 4111 1111 1111 1111 ", "Hlavná 1 Hlavná 1 ", "A A A A ", "Aaaaaaaaaaaaaaaaaaaaaaaaaaaa1 ",
+    "Ünïcödé wörds äöü ", "ЖЖЖЖ ", "ab\u200bcd", "４１１１ ", "\n\n\n", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n", "00 421 00 421 ", "ul. Hlavná ul. Hlavná ", "1-1-1-1-1-", "…", "+4", "SSN 1", "XX99 ",
+  ];
+  const DETECTORS: [string, (t: string) => unknown][] = [
+    ["secrets", detectSecrets], ["email", detectEmails], ["phone", detectPhones], ["iban", detectIbans], ["card", detectCards], ["govid", detectGovIds], ["address", detectAddresses], ["special", detectSpecial],
+  ];
+  it("each detector handles 16 KiB of hostile text in under 20 ms (median of 25 runs)", () => {
+    for (const shape of SHAPES) {
+      const text = fill(shape);
+      assert.equal(text.length, 16384);
+      for (const [name, detect] of DETECTORS) {
+        const m = median(() => detect(text), 25);
+        assert.ok(m < 20, `${name} on ${JSON.stringify(shape.slice(0, 24))}: median ${m.toFixed(2)} ms`);
+      }
+    }
+  });
+  it("classifying a 16 KiB message takes under 20 ms (median of 50 runs), on every shape", () => {
     assert.equal(fill(prose).length, 16384);
-    const shapes = [prose, "1234 5678 90 ", "12-34-56-78 ", "a@", "a.b@c.d ", "a.", "abcdefghij", "-----BEGIN X-----", "eyJabcdefgh.", "DE89 AB12 ", "lorem ipsum dolor sit amet cancer ", "12 Foo Bar ", "((", "1/2/3/", "password: ", "Ünïcödé wörds äöü "];
-    for (const s of shapes) {
-      const m = median(fill(s));
+    for (const s of SHAPES) {
+      const m = median(() => classifyText(fill(s)), 50);
       assert.ok(m < 20, `${JSON.stringify(s.slice(0, 20))}: median ${m.toFixed(2)} ms`);
     }
+  });
+  it("the whole pipeline for a 16 KiB message (clean, classify, route) stays under 40 ms", () => {
+    assert.ok(median(() => classifyRecord([fill(prose)]), 50) < 40);
   });
 });
