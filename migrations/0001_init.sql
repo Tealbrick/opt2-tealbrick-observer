@@ -49,9 +49,10 @@ CREATE TABLE obs_messages (
   edited_at INTEGER,
   deleted INTEGER NOT NULL DEFAULT 0,
   author_ref TEXT NOT NULL,                 -- canonical handle (<channel>:<value>)
+  author_key TEXT NOT NULL,                 -- author_ref as NFC + JS toLowerCase (exclusions compare in JS; SQLite lower() is ASCII only)
   author_kind TEXT NOT NULL CHECK (author_kind IN ('person', 'bot', 'self')),
   text TEXT,                                -- NULL after purge; ≤ 16 KiB (longer is cut with a marker)
-  text_digest TEXT NOT NULL,
+  text_digest TEXT NOT NULL,                -- HMAC-SHA256 with the app secret obs_digest_key (a plain hash of a short message can be guessed)
   record_id TEXT,
   PRIMARY KEY (source_id, conversation, provider_msg_id)  -- idempotent ingestion (DESIGN §4.1)
 );
@@ -91,8 +92,10 @@ CREATE TABLE obs_deliveries (
   next_at INTEGER,
   first_attempt_at INTEGER,
   last_error TEXT,
+  warning TEXT,                             -- e.g. may_duplicate: set when a retry after 23 h made a new key
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  UNIQUE (record_id, revision, destination) -- one outbox row per record revision and destination, whatever its key
 );
 CREATE INDEX obs_deliveries_by_status ON obs_deliveries (status, next_at);
 
@@ -113,7 +116,8 @@ CREATE TABLE obs_flags (
   by_type TEXT NOT NULL,
   by_id TEXT NOT NULL,
   reason TEXT NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  closed_at INTEGER                         -- set when the owner decides the record again; one OPEN flag per (agent, record)
 );
 CREATE INDEX obs_flags_by_agent_day ON obs_flags (by_id, created_at);
 
