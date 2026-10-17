@@ -398,7 +398,7 @@ export const handlers = {
       const r = recordRow(ctx.db, i.recordId);
       if (!r) throw notFound("record");
       // every guard (secret, state, destination, keep, text, held) lives in decideRecord
-      decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, input: i }, callerKey(ctx), now(), getPrivacy(ctx.db).textRetentionDays);
+      decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, acknowledged: i.acknowledged, input: i }, callerKey(ctx), now(), getPrivacy(ctx.db).textRetentionDays);
       ctx.statusChanged();
       const row = recordRow(ctx.db, i.recordId);
       if (!row) throw notFound("record");

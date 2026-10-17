@@ -476,19 +476,22 @@ export interface RecordView {
   createdAt: string | null;
   updatedAt: string | null;
 }
-/** Record summary: no message text (lists never carry text). */
+/** A token in the record looks like a secret (suspect_secret). Such a record is held as a whole: the owner sees its text only on purpose. */
+export const isPossibleSecret = (r: Row): boolean => (parsePii(r.pii_json).suspect_secret ?? 0) > 0;
+/** Record summary: no message text (lists never carry text). For a possible secret the thread subject is blank: a subject can carry the token itself, and a
+ *  list title, a heading or an Activity row would show it in clear text. */
 export function recordView(r: Row): RecordView {
   return {
     id: str(r.id),
     source: str(r.source_id),
-    thread: strOrNull(r.thread),
+    thread: isPossibleSecret(r) ? null : strOrNull(r.thread),
     windowStart: iso(r.window_start),
     windowEnd: iso(r.window_end),
     revision: Number(r.revision),
     state: str(r.state),
     pii: parsePii(r.pii_json),
     secret: Number(r.secret) === 1,
-    possibleSecret: (parsePii(r.pii_json).suspect_secret ?? 0) > 0,
+    possibleSecret: isPossibleSecret(r),
     ruleId: strOrNull(r.rule_id),
     actionable: Number(r.actionable) === 1,
     decidedBy: strOrNull(r.decided_by),
@@ -521,6 +524,7 @@ export function recordDetail(db: Db, r: Row, now: number): RecordView & { messag
   const msgs = db.prepare("SELECT * FROM obs_messages WHERE record_id = ? ORDER BY sent_at, provider_msg_id LIMIT 500").all(str(r.id));
   const cfg = loadClassifierConfig(db);
   let budget = SPAN_BUDGET_CHARS; // classification work per call: a record of many large messages must not stall the UI
+  const held = isPossibleSecret(r); // subject and author handle of a possible secret stay out of every answer (the text itself is shown, on purpose)
   return {
     ...recordView(r),
     messages: msgs.map((m) => {
@@ -530,11 +534,11 @@ export function recordDetail(db: Db, r: Row, now: number): RecordView & { messag
       return {
         conversation: str(m.conversation),
         id: str(m.provider_msg_id),
-        thread: strOrNull(m.thread),
+        thread: held ? null : strOrNull(m.thread),
         sentAt: iso(m.sent_at),
         editedAt: iso(m.edited_at),
         deleted: Number(m.deleted) === 1,
-        author: str(m.author_ref),
+        author: held ? "" : str(m.author_ref),
         authorKind: str(m.author_kind),
         text,
         // owner view only (review_get / record_get): where the detectors found something, never what
@@ -674,7 +678,7 @@ const MAY_DUPLICATE_AFTER_REDECIDE = "may_duplicate: an earlier attempt may have
 export function decideRecord(
   db: Db,
   r: Row,
-  d: { decision: Decision; destination: string | undefined; input: unknown },
+  d: { decision: Decision; destination: string | undefined; acknowledged?: boolean | undefined; input: unknown },
   by: string,
   now: number,
   textRetentionDays: number,
@@ -683,6 +687,10 @@ export function decideRecord(
   const revision = Number(r.revision);
   const deliver = d.decision === "deliver" || d.decision === "deliver_redacted";
   if (isSecretRecord(r) && d.decision !== "drop") throw new TbError("secret_drop_only", "this record held a secret; it can only be dropped", 409);
+  // a record held as a possible secret is delivered AS IT IS only when the owner says so, on purpose (a UI gate alone is not enough)
+  if (d.decision === "deliver" && isPossibleSecret(r) && d.acknowledged !== true) {
+    throw new TbError("acknowledgement_required", "this record was held as a possible secret; delivering it as it is needs acknowledged: true after you read the text", 400);
+  }
   if (str(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${str(r.state)}, not waiting for review`, 409);
   if (deliver) {
     if (d.destination === undefined) throw new TbError("destination_required", "choose where to deliver the record", 400);

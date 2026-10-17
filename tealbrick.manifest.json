@@ -2221,6 +2221,10 @@
               "inbox",
               "drop"
             ]
+          },
+          "acknowledged": {
+            "type": "boolean",
+            "description": "Required (true) to deliver a record held as a possible secret as it is (decision deliver). Deliver redacted needs no acknowledgement."
           }
         }
       },
