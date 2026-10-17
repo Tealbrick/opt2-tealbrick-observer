@@ -45,5 +45,7 @@
 .ob-apps { display: grid; gap: var(--tb-s3); margin: 0; padding: 0; list-style: none; }
 .ob-apps li { display: grid; gap: var(--tb-s1); }
 
+/* stacked rows (kit Table at 480px and below): centre the label and the value, so no baseline offset makes a fraction of a pixel */
+@media (max-width: 480px) { .ob-table td { align-items: center; } }
 @media (max-width: 960px) { .ob-split { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .ob-filter { width: 100%; } .ob-detail { padding: var(--tb-s4); } }
