@@ -1,0 +1,12 @@
+{
+  "inputs": {
+    "status": {},
+    "job_pause": {
+      "jobId": "job_01J0000000000000000C0NFJ0B"
+    },
+    "flag": {
+      "recordId": "rec_01J0000000000000000C0NFREC",
+      "reason": "Conformance: this record looks wrong."
+    }
+  }
+}

@@ -11,8 +11,13 @@ operation id (`src/app.ts`) and plain migrations (`migrations/`).
 | Path | Content |
 |---|---|
 | `tealbrick.manifest.json` | identity, runtime (data + backup volumes), operations, scopes, skills, backups, UI paths |
-| `src/app.ts` | `defineApp`: one typed handler per operation (op ids and I/O types from `#kit`), agent first-sight event |
-| `src/items.ts` | the app's table access (plain functions over the SDK `Db`) |
+| `src/app.ts` | `defineApp`: one typed handler per operation (28; op ids and I/O types from `#kit`), `onStart` (creates the locked rule 0), `pendingCount` (records in Review) |
+| `src/store.ts` | table access over the migrated `obs_*` tables (plain functions over the SDK `Db`): views, job state machine, rules, review decisions, outbox rows, purge. Agent `status` is built here from labels and counts only |
+| `src/connect.ts` | the Connect seam: `connectPort(ctx)` is null until Connect offers `data_*` (spec request R3), so `source_add`, `backfill_estimate`, `backfill_start` answer `connect_unavailable` (409) and `sources_available` answers `connectMissing` |
+| `src/guards.ts` | manifest invariants as pure functions: the Connect companion is exactly `crud ["read"]` with `data_*` ops only; no agent op output can carry text, sender, author or title |
+| `src/clock.ts`, `src/manifest.ts` | the injected clock (tests never wait) and the manifest reader |
+| `test/*.test.ts` | unit tests on a migrated in-memory database with a fake ctx (`helpers.ts`, `seed.ts`): agent ops, sources and jobs, rules, review and deliveries, privacy and purge, manifest guards, output schemas |
+| `conformance.start.ts`, `tealbrick-conformance.json` | the conformance harness; it seeds the fixture rows (`test/seed.ts`) that the agent ops need, because no op can create a job or a delivered record yet |
 | `src/main.ts` | `startApp(app, process.env)` |
 | `src/ui/` | React UI (`<TbProvider>` + `<AppShell>` from `@opt2-tealbrick/ui`), built to `dist/ui` |
 | `src/ui/standard.tsx` | the standard pages (Holds, Receipts, Agents & scopes, Backups & export) and the page router; pass your own words as props, do not edit (one source: the template) |
