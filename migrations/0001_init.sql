@@ -72,6 +72,7 @@ CREATE TABLE obs_records (
   actionable INTEGER NOT NULL DEFAULT 0,
   decided_by TEXT,
   decided_at INTEGER,
+  decided_destination TEXT,                 -- where the owner decided to deliver (knowledge | kanban | inbox); NULL for drop / keep. A retry must match it
   text_purge_at INTEGER,                    -- when the text of this record's messages goes (retention)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
