@@ -12,6 +12,8 @@ import { detectAll, LABELS, mergeSpans, redactText } from "../src/detect/index.t
 import { detectPhones } from "../src/detect/phone.ts";
 import { detectSecrets } from "../src/detect/secret.ts";
 import { detectSpecial } from "../src/detect/special.ts";
+import { detectSuspect } from "../src/detect/suspect.ts";
+import { joinedSecretScan } from "../src/records.ts";
 
 describe("redaction", () => {
   it("replaces each class with its label", () => {
@@ -138,9 +140,11 @@ describe("time budget", () => {
     prose, "1234 5678 90 ", "12-34-56-78 ", "a@", "a.b@c.d ", "a@a@a@a@", "a.", "abcdefghij", "-----BEGIN X-----", "eyJabcdefgh.", "DE89 AB12 ", "lorem ipsum dolor sit amet cancer ",
     "12 Foo Bar ", "((", "1/2/3/", "password: ", "key=value&", "=", ":a", "k=v\n", "0 0 0 0 ", "9 4111 1111 1111 1111 ", "Hlavná 1 Hlavná 1 ", "A A A A ", "Aaaaaaaaaaaaaaaaaaaaaaaaaaaa1 ",
     "Ünïcödé wörds äöü ", "ЖЖЖЖ ", "ab\u200bcd", "４１１１ ", "\n\n\n", "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n", "00 421 00 421 ", "ul. Hlavná ul. Hlavná ", "1-1-1-1-1-", "…", "+4", "SSN 1", "XX99 ",
+    "password", "password**|**", "PASSWORD  :  ", "api_key_api_key_", "key", "key=", "-p ", "--token ", "mysql -p ", "Cookie: a=b; ", "://", "a:b@", "-----BEGIN A-----\nabcd\n", "LS0tLS1CRUdJTi",
+    "<b>password</b> ", "&nbsp;", "Password for ", "(((((password:", "[\\w.-]", "ab ".repeat(30), "  \n  \n", "> AAAA\n", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n", "\\n", "dop_v1_", "key-", "8Q~", "1//",
   ];
   const DETECTORS: [string, (t: string) => unknown][] = [
-    ["secrets", detectSecrets], ["email", detectEmails], ["phone", detectPhones], ["iban", detectIbans], ["card", detectCards], ["govid", detectGovIds], ["address", detectAddresses], ["special", detectSpecial],
+    ["secrets", detectSecrets], ["email", detectEmails], ["phone", detectPhones], ["iban", detectIbans], ["card", detectCards], ["govid", detectGovIds], ["address", detectAddresses], ["special", detectSpecial], ["suspect", detectSuspect],
   ];
   it("each detector handles 16 KiB of hostile text in under 20 ms (median of 25 runs)", () => {
     for (const shape of SHAPES) {
@@ -161,5 +165,12 @@ describe("time budget", () => {
   });
   it("the whole pipeline for a 16 KiB message (clean, classify, route) stays under 40 ms", () => {
     assert.ok(median(() => classifyRecord([fill(prose)]), 50) < 40);
+  });
+  it("the joined scan of a 64 KiB record (16 messages of 4 KiB: three joins, every seam) takes under 250 ms (median of 25), on every shape", () => {
+    for (const s of [prose, ...SHAPES.slice(1, 12), "password: ", "api_key_", "-p "]) {
+      const parts = Array.from({ length: 16 }, () => fill(s).slice(0, 4096));
+      const m = median(() => joinedSecretScan(parts), 25);
+      assert.ok(m < 250, `${JSON.stringify(s.slice(0, 20))}: median ${m.toFixed(1)} ms`);
+    }
   });
 });

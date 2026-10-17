@@ -466,6 +466,8 @@ export interface RecordView {
   state: string;
   pii: Record<string, number>;
   secret: boolean;
+  /** a token in the text looks like a secret (suspect_secret): held for the owner, shown as "possible secret" */
+  possibleSecret: boolean;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;
@@ -486,6 +488,7 @@ export function recordView(r: Row): RecordView {
     state: str(r.state),
     pii: parsePii(r.pii_json),
     secret: Number(r.secret) === 1,
+    possibleSecret: (parsePii(r.pii_json).suspect_secret ?? 0) > 0,
     ruleId: strOrNull(r.rule_id),
     actionable: Number(r.actionable) === 1,
     decidedBy: strOrNull(r.decided_by),

@@ -8,10 +8,15 @@
 //    (a secret, a new PII class, more of one) goes back to Review with a new revision and without its unsent deliveries; the secret
 //    flag is set when a secret appeared (then only "drop" is allowed). An approved record whose content changed at all goes back too:
 //    its unsent delivery would send the old text.
-//  - purgeRecordText: a secret found across messages: every message text of the record goes (ids, digests and the secret flag stay).
+//  - scanRecord / purgeRecordText: a secret found across messages. The texts are joined with "\n", "" and " ", and every adjacent pair
+//    and triple is scanned at its seams too. A hit purges every message text of the record (ids, digests and the secret flag stay).
+//    Above 256 KiB (or 2000 messages) the record is not scanned further: it is marked suspect and held for Review.
+//  - a record with secret = 1 stores new and edited text as NULL (ids and digests only).
+//  - KNOWN LIMIT: a secret split across two DIFFERENT records (two windows 30+ minutes apart) is not found.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { classifyRecord } from "./classify.ts";
+import { detectSecrets } from "./detect/secret.ts";
 import { loadClassifierConfig, parsePii, type Row, recordRow } from "./store.ts";
 import type { MessageWindow } from "./window.ts";
 
@@ -31,13 +36,53 @@ export function purgeRecordText(db: Db, recordId: string, now: number): void {
   });
 }
 
+export const JOINED_CAP = 256 * 1024;
+export const MAX_SCANNED_MESSAGES = 2000;
+const SEAM = 4096;
+
+/** Scan the joined texts of a record for a secret that no single message holds: whole text with three separators, then each
+ *  adjacent pair and triple around its seams. "toolarge": over the cap, not scanned (the caller marks the record suspect). */
+export function joinedSecretScan(texts: readonly (string | null)[]): "hit" | "toolarge" | "clean" {
+  const parts = texts.filter((t): t is string => t !== null && t.length > 0);
+  if (parts.length === 0) return "clean";
+  const total = parts.reduce((n, t) => n + t.length, 0);
+  if (total > JOINED_CAP || parts.length > MAX_SCANNED_MESSAGES) return "toolarge";
+  const seps = ["\n", "", " "];
+  for (const sep of seps) if (parts.length > 1 && detectSecrets(parts.join(sep)).count > 0) return "hit";
+  for (let i = 0; i + 1 < parts.length; i++) {
+    const a = (parts[i] as string).slice(-SEAM);
+    const b = parts[i + 1] as string;
+    const c = parts[i + 2];
+    for (const sep of seps) {
+      if (detectSecrets(a + sep + b.slice(0, SEAM)).count > 0) return "hit";
+      if (c !== undefined && detectSecrets(a + sep + b.slice(0, 2 * SEAM) + sep + c.slice(0, SEAM)).count > 0) return "hit";
+    }
+  }
+  return "clean";
+}
+
+/** Run the joined scan on a stored record; a hit purges every message text of the record. */
+export function scanRecord(db: Db, recordId: string, now: number): "hit" | "toolarge" | "clean" {
+  const result = joinedSecretScan(recordTexts(db, recordId));
+  if (result === "hit") purgeRecordText(db, recordId, now);
+  return result;
+}
+
 /** Re-read the record's messages after a change and apply the rules above. Returns true when the record went back to Review. */
 export function reclassifyRecord(db: Db, recordId: string, now: number): boolean {
   const rec = recordRow(db, recordId);
   if (!rec) return false;
   const state = str(rec.state);
-  if (state === "open" || state === "classified" || state === "dropped") return false; // routed when the window closes / nothing to protect
+  if (state === "dropped") return false; // nothing to protect
+  // the SAME joined scan as at close: an edit or a late message can complete a secret that was split over messages
+  const scan = scanRecord(db, recordId, now);
+  if (state === "open" || state === "classified") return false; // routed (and dropped, for a secret) when the window closes
   const facts = classifyRecord(recordTexts(db, recordId), loadClassifierConfig(db));
+  if (scan === "hit") {
+    facts.classes.secret = Math.max(facts.classes.secret ?? 0, 1);
+    facts.secret = true;
+  }
+  if (scan === "toolarge") facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
   const before = parsePii(rec.pii_json);
   const hadSecret = Number(rec.secret) === 1 || (before.secret ?? 0) > 0;
   const grew = (facts.secret && !hadSecret) || Object.entries(facts.classes).some(([c, n]) => c !== "secret" && n > (before[c] ?? 0));
@@ -91,6 +136,8 @@ export function attachWindow(db: Db, sourceId: string, w: MessageWindow, now: nu
     let added = 0;
     const link = db.prepare("UPDATE obs_messages SET record_id = ? WHERE source_id = ? AND conversation = ? AND provider_msg_id = ? AND record_id IS NULL");
     for (const id of w.messageIds) added += link.run(recordId, sourceId, w.conversation, id).changes;
+    // a secret record keeps ids and digests only: text that arrives for it is not stored
+    if (Number(recordRow(db, recordId)?.secret) === 1) db.prepare("UPDATE obs_messages SET text = NULL, thread = NULL WHERE record_id = ?").run(recordId);
     if (!created && added > 0) {
       const state = str(target?.state);
       db.prepare(

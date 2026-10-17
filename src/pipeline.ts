@@ -3,8 +3,7 @@
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { classifyRecord } from "./classify.ts";
-import { detectSecrets } from "./detect/secret.ts";
-import { purgeRecordText } from "./records.ts";
+import { scanRecord } from "./records.ts";
 import { type Route, type RouteFacts, routeFacts } from "./router.ts";
 import { DAY_MS, decideRecord, getPrivacy, listRules, loadClassifierConfig, notFound, type Row, recordRow } from "./store.ts";
 
@@ -14,19 +13,21 @@ export function applyRouting(db: Db, recordId: string, now: number): { route: Ro
     const rec = recordRow(db, recordId);
     if (!rec) throw notFound("record");
     if (!["open", "classified"].includes(String(rec.state))) throw new TbError("record_state_invalid", `cannot route a record that is ${String(rec.state)}`, 409);
+    // the record closes: look for a secret in the JOINED texts too (one split over messages, e.g. "password:" and then the value),
+    // with several separators and at every seam. A hit means a secret is stored in pieces: every message text of the record goes,
+    // ids / digests / the flag stay. Too big to scan (256 KiB): held for Review as suspect.
+    const scan = scanRecord(db, recordId, now);
+    const crossHit = scan === "hit";
     const msgs = db.prepare("SELECT conversation, author_key, text FROM obs_messages WHERE record_id = ? AND deleted = 0 ORDER BY sent_at, provider_msg_id").all(recordId);
     const cfg = loadClassifierConfig(db);
     const texts = msgs.map((m) => (m.text === null ? null : String(m.text)));
     const facts = classifyRecord(texts, cfg);
-    // the record closes: look for a secret in the JOINED text too (one that was split over two messages, e.g. "password:" and then
-    // the value). A hit means a secret is stored in pieces: every message text of the record goes, ids / digests / the flag stay.
     const joined = texts.filter((t): t is string => t !== null).join("\n");
-    const crossHit = joined.length > 0 && detectSecrets(joined).count > 0;
     if (crossHit) {
-      purgeRecordText(db, recordId, now);
       facts.classes.secret = Math.max(facts.classes.secret ?? 0, 1);
       facts.secret = true;
     }
+    if (scan === "toolarge") facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, 1);
     const hasText = !crossHit && texts.some((t) => t !== null);
     const secret = facts.secret || crossHit || Number(rec.secret) === 1;
     const rf: RouteFacts = {

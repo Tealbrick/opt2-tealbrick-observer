@@ -15,7 +15,7 @@ import { authorKey, conversationsOf, excludeOf, isExcluded, sourceRow } from "./
 
 export const MAX_TEXT_BYTES = 16 * 1024;
 export const CUT_MARKER = " […cut]";
-const DETECT_CHARS = 64 * 1024;
+const DETECT_CHARS = 256 * 1024; // detectSecrets scans long text in overlapping 64 K windows
 const RESERVE_BYTES = 64; // room for the cut marker and a secret marker
 
 export interface Sanitized {
@@ -108,8 +108,10 @@ export function storeMessage(db: Db, sourceId: string, m: IncomingMessage, arriv
     const newer = editedAt !== null && (old.edited_at === null || editedAt > Number(old.edited_at));
     const nowDeleted = m.deleted === true && Number(old.deleted) === 0;
     if (!newer && !nowDeleted) return { status: "unchanged" as const, secrets: 0 };
+    // an edit to a message of a secret record is not stored as text (ids and digests only)
+    const secretRecord = old.record_id != null && Number(db.prepare("SELECT secret FROM obs_records WHERE id = ?").get(String(old.record_id))?.secret) === 1;
     db.prepare("UPDATE obs_messages SET text = ?, text_digest = ?, edited_at = ?, deleted = ? WHERE source_id = ? AND conversation = ? AND provider_msg_id = ?").run(
-      text,
+      secretRecord ? null : text,
       digest,
       editedAt ?? (old.edited_at === null ? null : Number(old.edited_at)),
       m.deleted ? 1 : Number(old.deleted),

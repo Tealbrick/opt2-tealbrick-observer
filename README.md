@@ -82,3 +82,13 @@ image name in `tealbrick-ci.json` (`opt2-tealbrick-observer`).
 - Classification is deterministic (no model) and offsets-only: `review_get` and `record_get` return, per message, `spans` of `{class, start, end}` for the owner; no agent op returns them (the agent output allow-list in `src/guards.ts` fails on any new field). Settings: `gov_id_countries` (JSON list, default SK, CZ, DE, US) and `actionable_words` (JSON list) in `obs_settings`.
 - Known limits of the detectors: addresses need a street with a house number; a bare `0042…` number without a separator is read as an order number, not a phone; a password is recognised only next to a keyword (`password`, `token`, `api key`, `secret`, `heslo`, `Passwort` … also inside identifiers such as `DB_PASSWORD`), by a known key format, or as a high-entropy value after `=` / `:`. After an explicit `:` or `=` the whole rest of the line (or the quoted value) is removed: over-redacting is the safe side.
 - Detection runs on a normalised copy (NFKC, zero-width and other format characters dropped, Cyrillic/Greek look-alikes folded for secrets) and maps every span back to the original offsets, so redaction covers the characters that were typed. A secret split over two messages is found in the joined text when the record closes: every message text of that record is then removed (ids, digests and the secret flag stay).
+
+## What Observer does with secrets (an honest claim)
+Observer removes the secrets it recognises before it stores a message: private keys and certificates (PEM, PuTTY), JWTs, API keys and tokens of the common services, passwords / tokens / keys written as `name = value` (also in identifiers such as `DB_PASSWORD`, in SQL, command lines, JSON, YAML and markdown), credentials in URLs, cookies and authorization headers. It also holds any record that contains a token that merely LOOKS like a secret (a long random-looking string) for your review: such a record is never delivered automatically, and it is not purged automatically either, because it may be a false positive. **It is not a complete secret scanner.** A secret in a form nobody wrote a pattern for can get through, and a record is only held when its text looks suspicious.
+
+Known limits (no fix planned):
+- A secret split across two different records, 30 minutes or more apart, is not found: the records are scanned one by one.
+- Keywords are recognised in English, Slovak, Czech and German; a key name in another language is found only by its value (a known key format, or a high-entropy token).
+- Over-redaction is the safe side: after an explicit `:` or `=` the whole rest of the line is removed.
+- A record over 256 KiB (or with more than 2000 messages) is not scanned across messages; it is held for review as suspect instead.
+

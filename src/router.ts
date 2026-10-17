@@ -1,5 +1,6 @@
 // The router (DESIGN §4.3 step 4). Pure: facts + rules → a decision.
 //   1. rule 0 FIRST: a secret record is dropped before any owner rule is looked at (a catch-all rule cannot deliver it)
+//   1b. a record with a suspect_secret token goes to Review whatever the rules say
 //   2. the owner's rules in order; the FIRST rule that matches decides (also when the decision is "review")
 //   3. a rule that delivers a record holding PII (email, phone, bank account, card, id, address, special category) without
 //      `redact: true` sends the record to Review instead
@@ -24,7 +25,7 @@ export type Destination = "knowledge" | "kanban" | "inbox";
 export type Route =
   | { kind: "drop"; ruleId: string; reason: "secret" | "rule" }
   | { kind: "deliver"; ruleId: string; destination: Destination; redact: boolean }
-  | { kind: "review"; ruleId: string | null; reason: "no_rule" | "pii_needs_redact" | "no_text" };
+  | { kind: "review"; ruleId: string | null; reason: "no_rule" | "pii_needs_redact" | "no_text" | "suspect_secret" };
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
 const matcherCache = new Map<string, ReturnType<typeof buildWordMatcher>>();
@@ -68,6 +69,8 @@ export const piiClassesOf = (classes: Readonly<Record<string, number>>): string[
 export function routeFacts(f: RouteFacts, rules: readonly RuleView[]): Route {
   // the flag OR a secret count in the classes: either one is enough
   if (f.secret || (f.classes.secret ?? 0) > 0) return { kind: "drop", ruleId: RULE_ZERO_ID, reason: "secret" };
+  // a token that LOOKS like a secret (suspect_secret): never delivered automatically, whatever the rules say; the owner decides
+  if ((f.classes.suspect_secret ?? 0) > 0) return { kind: "review", ruleId: null, reason: "suspect_secret" };
   for (const rule of [...rules].sort((a, b) => a.position - b.position)) {
     if (rule.id === RULE_ZERO_ID || !matches(rule.match, f)) continue;
     const deliver = String(rule.action.deliver);

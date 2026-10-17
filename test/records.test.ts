@@ -11,7 +11,7 @@ import { attachWindow, reclassifyRecord } from "../src/records.ts";
 import { RULE_ZERO_ID } from "../src/store.ts";
 import { liveWindows } from "../src/window.ts";
 import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
-import { ingestRecord, seedSource } from "./seed.ts";
+import { ingestRecord, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 const NOW = Date.UTC(2026, 9, 17, 12, 0, 0);
 const j = (...p: string[]) => p.join("");
@@ -237,5 +237,106 @@ describe("every PII class sends a record to Review unless the rule redacts", () 
     const id = ingestRecord(db, src, ["lunch at noon on tuesday works for me"], NOW);
     assert.equal(applyRouting(db, id, NOW).route.kind, "deliver");
     assert.equal(rec(id).state, "approved");
+  });
+});
+
+describe("an edit or a late message completes a split secret (the SAME joined scan as at close)", () => {
+  const store = (id: string, text: string, at: number, editedAt?: number) =>
+    storeMessage(db, src, { conversation: "inbox", providerMsgId: id, thread: "t1", sentAt: at, ...(editedAt ? { editedAt } : {}), author: "email:anna@example.com", authorKind: "person", text }, NOW);
+  const win = (ids: string[], at: number) => liveWindows(ids.map((id, i) => ({ id, conversation: "inbox", thread: "t1", sentAt: at + i * 1000, chars: 5 })), at + 3_600_000)[0] as NonNullable<ReturnType<typeof liveWindows>[0]>;
+  const at = NOW - 3 * 3_600_000;
+
+  async function approvedPair(): Promise<string> {
+    await put({}, { deliver: "knowledge" });
+    store("m1", "the vpn login is below, api_k", at);
+    store("m2", "see you at ten", at + 1000);
+    const a = attachWindow(db, src, win(["m1", "m2"], at), NOW);
+    applyRouting(db, a.recordId, NOW);
+    assert.equal(rec(a.recordId).state, "approved");
+    return a.recordId;
+  }
+
+  it("an edit that completes it: every message text goes, the record is a secret record in Review, unsent deliveries are cancelled", async () => {
+    const id = await approvedPair();
+    const r = store("m2", "ey=abcd1234", at + 1000, NOW - 1000);
+    assert.equal(r.reopened, true);
+    const after = rec(id);
+    assert.deepEqual([after.state, after.secret, after.revision], ["review", 1, 2]);
+    assert.ok(msgs(id).every((m) => m.text === null && m.thread === null), "no tail survives");
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+    assert.ok(!JSON.stringify(db.prepare("SELECT * FROM obs_messages").all()).includes("ey=abcd1234"));
+    await assert.rejects(handlers.review_decide.run({ recordId: id, decision: "deliver", destination: "knowledge" } as never, O()), { code: "secret_drop_only" });
+  });
+  it("a late message that completes it does the same", async () => {
+    await put({}, { deliver: "knowledge" });
+    store("m1", "the vpn login is below, api_k", at);
+    const a = attachWindow(db, src, win(["m1"], at), NOW);
+    applyRouting(db, a.recordId, NOW);
+    assert.equal(rec(a.recordId).state, "approved");
+    store("m3", "ey=abcd1234", at + 2000);
+    attachWindow(db, src, win(["m1", "m3"], at), NOW);
+    assert.deepEqual([rec(a.recordId).state, rec(a.recordId).secret], ["review", 1]);
+    assert.ok(msgs(a.recordId).every((m) => m.text === null));
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+  });
+  it("a secret record stores new and edited text as NULL: ids and digests only", async () => {
+    const id = await approvedPair();
+    store("m2", "ey=abcd1234", at + 1000, NOW - 1000);
+    const digestBefore = String(db.prepare("SELECT text_digest FROM obs_messages WHERE provider_msg_id = 'm1'").get()?.text_digest);
+    store("m1", "a different first message", at, NOW - 500);
+    const m1 = db.prepare("SELECT text, text_digest FROM obs_messages WHERE provider_msg_id = 'm1'").get();
+    assert.equal(m1?.text, null, "an edit of a message of a secret record keeps no text");
+    assert.notEqual(m1?.text_digest, digestBefore, "…but the digest follows the edit");
+    store("m4", "one more message", at + 3000);
+    attachWindow(db, src, win(["m1", "m2", "m4"], at), NOW);
+    assert.equal(db.prepare("SELECT text FROM obs_messages WHERE provider_msg_id = 'm4'").get()?.text, null);
+    assert.equal(msgs(id).length, 3);
+  });
+  it("a clean edit changes nothing about secrecy and keeps its text", async () => {
+    const id = await approvedPair();
+    store("m2", "see you at eleven", at + 1000, NOW - 1000);
+    assert.equal(rec(id).secret, 0);
+    assert.equal(db.prepare("SELECT text FROM obs_messages WHERE provider_msg_id = 'm2'").get()?.text, "see you at eleven");
+  });
+});
+
+describe("suspect_secret: held for Review whatever the rules say", () => {
+  const KEY = j("k8Jd92LmQx", "7PzVb3TnYc", "8WsDuR4"); // built at run time
+  it("a record with a random-looking token is never delivered automatically, not even by a catch-all rule; its text is kept", async () => {
+    const rule = (await put({}, { deliver: "knowledge" })) as { rule: { id: string } };
+    const id = ingestRecord(db, src, [`the staging code is ${KEY} for now`], NOW);
+    const out = applyRouting(db, id, NOW);
+    assert.deepEqual(out.route, { kind: "review", ruleId: null, reason: "suspect_secret" });
+    assert.notEqual(rec(id).rule_id, rule.rule.id);
+    assert.deepEqual([rec(id).state, rec(id).secret, JSON.parse(String(rec(id).pii_json))], ["review", 0, { suspect_secret: 1 }]);
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+    assert.ok(msgs(id).every((m) => m.text !== null), "not purged: it may be a false positive");
+  });
+  it("also when a rule would drop it; and ordinary records still follow their rules", async () => {
+    await put({ words: ["staging"] }, { deliver: "drop" });
+    const id = ingestRecord(db, src, [`the staging code is ${KEY}`], NOW);
+    assert.equal(applyRouting(db, id, NOW).route.kind, "review");
+    const plain = ingestRecord(db, src, ["the staging server is down again"], NOW + 1000);
+    assert.equal(applyRouting(db, plain, NOW + 1000).route.kind, "drop");
+  });
+  it("the owner sees 'possible secret' (record flag and a span of that class); deliver_redacted redacts the token; the owner may still decide", async () => {
+    await put({}, { deliver: "knowledge", redact: true });
+    const id = ingestRecord(db, src, [`code ${KEY} ok`], NOW);
+    applyRouting(db, id, NOW);
+    const view = (await handlers.review_get.run({ id } as never, O())) as { record: { possibleSecret: boolean; messages: { spans: { class: string }[] }[] } };
+    assert.equal(view.record.possibleSecret, true);
+    assert.deepEqual(view.record.messages[0]?.spans.map((x) => x.class), ["suspect_secret"]);
+    const out = (await handlers.review_decide.run({ recordId: id, decision: "deliver_redacted", destination: "knowledge" } as never, O())) as { record: { state: string } };
+    assert.equal(out.record.state, "approved");
+    const { redactText, detectAll } = await import("../src/detect/index.ts");
+    assert.equal(redactText(`code ${KEY} ok`, detectAll(`code ${KEY} ok`)), "code [possible secret] ok");
+  });
+  it("a record too big to scan (over 256 KiB) is held as suspect, not delivered", async () => {
+    await put({}, { deliver: "knowledge" });
+    const id = seedRecord(db, src, { state: "open" });
+    for (let i = 0; i < 20; i++) seedMessage(db, src, { record: id, id: `big${i}`, sentAt: NOW - 100_000 + i, text: "word ".repeat(3000) });
+    const out = applyRouting(db, id, NOW);
+    assert.deepEqual(out.route, { kind: "review", ruleId: null, reason: "suspect_secret" });
+    assert.equal(JSON.parse(String(rec(id).pii_json)).suspect_secret, 1);
   });
 });
