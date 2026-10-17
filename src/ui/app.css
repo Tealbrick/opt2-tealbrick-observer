@@ -1,0 +1,47 @@
+/* Observer layout only: the source cards, the review list and detail, the rule and delivery rows of the approved mockup
+   (coordination/design/mockups/build-app-observer.ts). Buttons, fields, selects, tags, notices, tables, checks and dialogs are the
+   kit; page helpers (.app-page, .page-head, .ruled, .item, .kv) are pages.css. Tokens only (check-system src). */
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: var(--tb-s3); }
+.cards > .tb-card { display: grid; gap: var(--tb-s3); align-content: start; }
+.cards h3 { font-size: 1.0625rem; font-weight: var(--tb-weight-head); line-height: 22px; overflow-wrap: anywhere; }
+.meta { color: var(--tb-muted); font-size: var(--tb-text-tag); font-weight: var(--tb-weight-nav); line-height: 20px; overflow-wrap: anywhere; }
+.ob-head { gap: var(--tb-s2); }
+.ob-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* sources */
+.ob-src-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--tb-s3); align-items: center; }
+.ob-svc { display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: var(--tb-radius-brick); background: var(--tb-plate); color: var(--tb-ink); font-weight: var(--tb-weight-head); }
+.ob-prog { display: grid; gap: 6px; min-width: 0; }
+.ob-src .kv dd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+
+/* review */
+.ob-split { display: grid; grid-template-columns: minmax(260px, 360px) minmax(0, 1fr); gap: var(--tb-s6); align-items: start; }
+.ob-split > * { min-width: 0; }
+.ob-list { align-content: start; }
+.ob-row { display: grid; gap: 4px; padding: 14px 12px; color: var(--tb-ink); text-decoration: none; border-radius: var(--tb-radius-brick); }
+.ob-row:hover { background: var(--tb-tile); }
+.ob-row.is-sel { background: var(--tb-tile); box-shadow: inset 0 0 0 2px var(--tb-ink); }
+.ob-row b { font-weight: var(--tb-weight-label); line-height: 22px; overflow-wrap: anywhere; }
+.ob-tags { gap: 6px; }
+.ob-more { padding: var(--tb-s3) 12px; }
+.ob-detail { display: grid; gap: var(--tb-s4); padding: var(--tb-s6); border-radius: var(--tb-radius-brick); background: var(--tb-tile); box-shadow: var(--tb-ring-strong); }
+.ob-detail h2 { font-size: 1.5rem; line-height: 28px; overflow-wrap: anywhere; }
+.ob-detail-head { justify-content: space-between; align-items: flex-start; }
+.ob-msgs { display: grid; gap: var(--tb-s2); padding: 12px 0; box-shadow: var(--tb-hair-top), var(--tb-hair-bottom); color: var(--tb-ink-soft); overflow-wrap: anywhere; }
+.ob-msgs mark { position: relative; background: var(--tb-plate); color: var(--tb-ink); border-radius: var(--tb-radius-brick); padding: 0 2px; }
+.ob-msgs mark.is-secret { background: var(--tb-brick-wash); }
+.ob-dest { display: grid; gap: var(--tb-s2); max-width: 320px; }
+.ob-detail .kv dd { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+
+/* routing, activity, settings */
+.item h3 .tb-tag { margin-left: var(--tb-s2); vertical-align: middle; }
+.item p .tb-icon, .item p img { vertical-align: middle; }
+.ob-filter { display: grid; gap: var(--tb-s2); width: 220px; }
+.ob-status { gap: var(--tb-s2); justify-content: flex-end; }
+.ob-warn { display: block; color: var(--tb-ink-soft); font-weight: var(--tb-weight-nav); }
+.ob-dest-cell { display: inline-flex; align-items: center; gap: var(--tb-s2); }
+.ob-apps { display: grid; gap: var(--tb-s3); margin: 0; padding: 0; list-style: none; }
+.ob-apps li { display: grid; gap: var(--tb-s1); }
+
+@media (max-width: 960px) { .ob-split { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .ob-filter { width: 100%; } .ob-detail { padding: var(--tb-s4); } }

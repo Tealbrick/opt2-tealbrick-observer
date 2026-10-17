@@ -1,0 +1,105 @@
+// Reading history: the start date, the estimate and the start of a history job (backfill_estimate, backfill_start). Used by the
+// last step of "Add source" and by "Read history…" on a source card.
+import { Button, Dialog, Field, TextInput } from "@opt2-tealbrick/ui";
+import { useEffect, useState } from "react";
+import { count, type Out, run, type Source } from "./api.ts";
+import { Failure, useAct } from "./common.tsx";
+
+const DAY = 86_400_000;
+const dayString = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+/** Three years back is the server's limit (BACKFILL_MAX_YEARS); the date field stops one day short so a time zone never trips it. */
+export const OLDEST = () => dayString(Date.now() - (3 * 365 - 2) * DAY);
+export const TODAY = () => dayString(Date.now());
+const DEFAULT_DAYS = 90;
+
+export type Estimate = Out<"backfill_estimate">;
+
+/** "about 2 min", "about 1 h 10 min". */
+export function durationLabel(seconds: number): string {
+  if (seconds < 90) return "about a minute";
+  const m = Math.round(seconds / 60);
+  return m < 60 ? `about ${m} min` : `about ${Math.floor(m / 60)} h${m % 60 ? ` ${m % 60} min` : ""}`;
+}
+
+export function useHistory(sourceId: string | null) {
+  const [since, setSinceState] = useState(() => dayString(Date.now() - DEFAULT_DAYS * DAY));
+  const [estimate, setEstimate] = useState<Estimate | null>(null);
+  const { busy, error, setError, act } = useAct();
+  useEffect(() => {
+    // another source or a new dialog: start again
+    void sourceId;
+    setSinceState(dayString(Date.now() - DEFAULT_DAYS * DAY));
+    setEstimate(null);
+    setError(null);
+  }, [sourceId, setError]);
+  const setSince = (v: string) => {
+    setSinceState(v);
+    setEstimate(null);
+  };
+  const valid = /^\d{4}-\d{2}-\d{2}$/.test(since) && since >= OLDEST() && since <= TODAY();
+  const iso = `${since}T00:00:00Z`;
+  return {
+    since,
+    setSince,
+    valid,
+    estimate,
+    busy,
+    error,
+    runEstimate: () =>
+      act(async () => {
+        if (sourceId) setEstimate(await run("backfill_estimate", { source: sourceId, since: iso }));
+      }),
+    start: () =>
+      act(async () => {
+        if (sourceId) await run("backfill_start", { source: sourceId, since: iso });
+      }),
+  };
+}
+
+export function HistoryFields({ h }: { h: ReturnType<typeof useHistory> }) {
+  return (
+    <div className="tb-stack">
+      <Field label="Read messages since" hint="History reaches back three years at most. Observer reads it in the background. You can pause or stop it." error={h.valid ? undefined : "Pick a date within the last three years."}>
+        <TextInput type="date" value={h.since} min={OLDEST()} max={TODAY()} onChange={(e) => h.setSince(e.target.value)} />
+      </Field>
+      <div className="tb-ctas">
+        <Button size="sm" onClick={() => void h.runEstimate()} disabled={h.busy || !h.valid}>
+          Estimate
+        </Button>
+      </div>
+      {h.estimate ? (
+        <p className="tb-soft" role="status">
+          About {count(h.estimate.messages)} messages and {count(h.estimate.records)} records, {durationLabel(h.estimate.durationS)}.{h.estimate.providerNote ? ` ${h.estimate.providerNote}` : ""}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** "Read history…" on a source card. */
+export function HistoryDialog({ source, onClose, onStarted }: { source: Source | null; onClose: () => void; onStarted: () => void }) {
+  const h = useHistory(source?.id ?? null);
+  const go = async () => {
+    if (await h.start()) {
+      onStarted();
+      onClose();
+    }
+  };
+  return (
+    <Dialog
+      open={source !== null}
+      title="Read history"
+      kicker={source?.label}
+      busy={h.busy}
+      onClose={onClose}
+      footer={
+        <Button variant="primary" onClick={() => void go()} disabled={h.busy || !h.valid}>
+          Read history
+        </Button>
+      }
+    >
+      <Failure message={h.error} />
+      <HistoryFields h={h} />
+    </Dialog>
+  );
+}
