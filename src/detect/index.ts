@@ -8,6 +8,7 @@ import { mapBack, normalize } from "./normalize.ts";
 import { detectPhones } from "./phone.ts";
 import { detectSecrets } from "./secret.ts";
 import { detectSpecial } from "./special.ts";
+import { detectSuspect } from "./suspect.ts";
 import type { Detection } from "./types.ts";
 
 export interface DetectConfig {
@@ -32,6 +33,7 @@ export function detectAll(text: string, cfg: DetectConfig = {}): Detection[] {
     back(detectGovIds(t, cfg.govCountries ?? DEFAULT_GOV_COUNTRIES)),
     back(detectAddresses(t)),
     back(detectSpecial(t)),
+    back(detectSuspect(t)),
   ];
   return all.filter((d) => d.count > 0);
 }

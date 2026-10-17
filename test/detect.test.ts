@@ -57,16 +57,17 @@ describe("secrets", () => {
   it("fires on PEM blocks (also an unterminated one: to the end), JWT/JWS and JWE with an empty part", () => {
     const pem = `${PEM_HEAD("RSA")}\nMIIEowIBAAKCAQEA7\nabc==\n${PEM_FOOT("RSA")}`;
     fires(detectSecrets, [
-      [`key:\n${pem}\nthanks`, [pem]],
+      [`see below:\n${pem}\nthanks`, [pem]],
       [`${PEM_HEAD("OPENSSH")}\nb3BlbnNzaC1rZXk`, [`${PEM_HEAD("OPENSSH")}\nb3BlbnNzaC1rZXk`]],
       [`token ${JWT} end`, [JWT]],
       [`jwe ${JWE} end`, [JWE]],
     ]);
   });
-  it("fires on a PEM body without its header: four or more lines of 60+ base64 characters", () => {
+  it("fires on a PEM body without its header: three or more lines of 60+ base64 characters", () => {
     const body = rep(`${B64_LINE}\n`, 4);
     fires(detectSecrets, [[`here:\n${body}done`, [`${body.trimEnd()}\n`].map((x) => x)]]);
-    assert.equal(detectSecrets(`${rep(`${B64_LINE}\n`, 3)}done`).count, 0, "three lines are not enough");
+    assert.equal(detectSecrets(`${rep(`${B64_LINE}\n`, 3)}done`).count, 1, "three lines are enough");
+    assert.equal(detectSecrets(`${rep(`${B64_LINE}\n`, 2)}done`).count, 0, "two lines are not");
     assert.equal(detectSecrets(rep("this is an ordinary sentence of prose that is long enough to wrap around the line\n", 6)).count, 0, "prose has spaces");
   });
   it("fires on key formats: sk-, GitHub, AWS, Slack (xox, xapp, webhook), GitLab, Tealbrick, Stripe webhook, npm, Hugging Face, SendGrid, Google, Telegram", () => {
@@ -78,7 +79,8 @@ describe("secrets", () => {
   it("fires on Basic and Bearer credentials (any token of 8+ characters), URL credentials and Azure keys / SAS signatures", () => {
     fires(detectSecrets, [
       [BASIC, [BASIC]],
-      ["Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789", ["Bearer abcdefghijklmnopqrstuvwxyz0123456789"]],
+      ["Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789", ["Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789"]],
+      ["send Bearer abcdefghijklmnopqrstuvwxyz0123456789 now", ["Bearer abcdefghijklmnopqrstuvwxyz0123456789"]],
       ["curl -H 'Bearer abcd1234'", ["Bearer abcd1234"]],
       [j("postgres://admin:s3cretpw", "@db.example.com/app"), [j("postgres://admin:s3cretpw", "@")]],
       [`Server=x;${ACCOUNT_KEY};EndpointSuffix=core`, [ACCOUNT_KEY]],

@@ -2,7 +2,7 @@
 // Spans are [start, end) offsets in UTF-16 code units of the text that was given (the same offsets JS string methods use).
 // Detections hold offsets and classes ONLY: never the matched value.
 export type PiiClass = "email" | "phone" | "iban" | "card" | "id" | "address" | "special";
-export type DetectClass = "secret" | PiiClass;
+export type DetectClass = "secret" | "suspect_secret" | PiiClass;
 export interface Span {
   start: number;
   end: number;

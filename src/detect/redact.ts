@@ -4,6 +4,7 @@ import type { DetectClass, Detection, Span } from "./types.ts";
 
 export const LABELS: Readonly<Record<DetectClass, string>> = {
   secret: "[secret removed]",
+  suspect_secret: "[possible secret]",
   email: "[email]",
   phone: "[phone]",
   iban: "[bank account]",
@@ -13,7 +14,7 @@ export const LABELS: Readonly<Record<DetectClass, string>> = {
   special: "[special category]",
 };
 /** Which label a merged span gets when classes overlap: first in this list wins. */
-export const PRIORITY: readonly DetectClass[] = ["secret", "iban", "card", "id", "email", "phone", "address", "special"];
+export const PRIORITY: readonly DetectClass[] = ["secret", "suspect_secret", "iban", "card", "id", "email", "phone", "address", "special"];
 
 export interface ClassedSpan extends Span {
   class: DetectClass;
