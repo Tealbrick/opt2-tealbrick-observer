@@ -179,10 +179,13 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       } WHERE id = ?`,
     ).run(next, pausedBy, now, str(r.id));
     if (liveReset && reanchor) {
-      // the gap is said honestly: from the last page read (or the old anchor) to the fresh anchor
-      const from = r.last_read_at ?? r.anchor_at;
-      const note = `Observer restarted reading from now. Messages between ${from === null || from === undefined ? "the last read" : humanTime(Number(from))} and ${humanTime(reanchor.at)} may be missing: start a history read to fill them.`;
-      db.prepare("UPDATE obs_jobs SET cursor = ?, anchor = ?, anchor_at = ?, note = ? WHERE id = ?").run(reanchor.anchor, reanchor.anchor, reanchor.at, note, str(r.id));
+      // the gap is said honestly: from the last time the job was CAUGHT UP (a page came back exhausted; else its old anchor) to
+      // the fresh anchor. A gap that is still open is kept: the span only grows until a history read covers it.
+      const caught = r.caught_up_at ?? r.anchor_at;
+      const candidates = [caught, r.gap_from].filter((x) => x !== null && x !== undefined).map(Number);
+      const from = candidates.length > 0 ? Math.min(...candidates) : null;
+      const note = `Observer restarted reading from now. Messages between ${from === null ? "the last read" : humanTime(from)} and ${humanTime(reanchor.at)} may be missing: start a history read to fill them.`;
+      db.prepare("UPDATE obs_jobs SET cursor = ?, anchor = ?, anchor_at = ?, note = ?, gap_from = ? WHERE id = ?").run(reanchor.anchor, reanchor.anchor, reanchor.at, note, from ?? reanchor.at, str(r.id));
     }
   });
   const row = jobRow(db, str(r.id));

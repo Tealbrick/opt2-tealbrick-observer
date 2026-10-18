@@ -14,7 +14,22 @@ export function migratedDb(): Db {
     exec: (sql: string) => raw.exec(sql),
     prepare: (sql: string) => raw.prepare(sql),
     transaction<T>(fn: () => T): T {
-      if (depth > 0) return fn();
+      // nested = a savepoint, like the SDK's tx(): an inner failure rolls back only the inner part
+      if (depth > 0) {
+        const sp = `tsp${depth}`;
+        raw.exec(`SAVEPOINT ${sp}`);
+        depth++;
+        try {
+          const out = fn();
+          raw.exec(`RELEASE ${sp}`);
+          return out;
+        } catch (e) {
+          raw.exec(`ROLLBACK TO ${sp}; RELEASE ${sp}`);
+          throw e;
+        } finally {
+          depth--;
+        }
+      }
       depth++;
       raw.exec("BEGIN");
       try {

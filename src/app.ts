@@ -411,8 +411,6 @@ export const handlers = {
       const anchorAt = now();
       const end = anchorAt + BACKFILL_UNTIL_MARGIN_MS;
       const job = createBackfill(ctx.db, i.source, { since, until: until === null ? end : Math.min(until, end), maxMessages: i.maxMessages ?? BACKFILL_DEFAULT_MAX_MESSAGES, anchor, anchorAt }, anchorAt);
-      // a history read is what the note of a restarted live job asks for: it has been started
-      ctx.db.prepare("UPDATE obs_jobs SET note = NULL WHERE source_id = ? AND kind = 'live'").run(i.source);
       syncSdkJob(jobsOf(ctx), ctx.db, String(job.id));
       ctx.statusChanged();
       return { job: jobView(jobRow(ctx.db, String(job.id)) ?? job) };

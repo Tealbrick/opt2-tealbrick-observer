@@ -14,3 +14,11 @@ ALTER TABLE obs_jobs ADD COLUMN note TEXT;
 -- kept_days     how many days Connect keeps this account's messages (data_catalog retentionDays, read at source_add); with
 --               history_capable it is what the source card says about history
 ALTER TABLE obs_sources ADD COLUMN kept_days INTEGER;
+-- caught_up_at  live: when a page last came back `exhausted` (everything up to then was read); a restart's gap starts here
+-- gap_from      live: the start of a span a restart from a fresh anchor may have missed (it ends at anchor_at); cleared, with
+--               the note, only when a history read that covers the span is done
+ALTER TABLE obs_jobs ADD COLUMN caught_up_at INTEGER;
+ALTER TABLE obs_jobs ADD COLUMN gap_from INTEGER;
+-- problem       a record Observer could not window or route (an error of its own pipeline): it is held in Review as a possible
+--               secret with this fixed reason, so one bad record never stalls the source
+ALTER TABLE obs_records ADD COLUMN problem TEXT;

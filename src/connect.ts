@@ -252,9 +252,17 @@ const PLAIN: Record<string, string> = {
   rate_limited: "Connect is busy. Observer waits and tries again by itself.",
   call_budget: CALL_BUDGET_MESSAGE,
 };
-/** The sentence the owner reads for a failure (never the provider's own message: it can carry untrusted text). */
-export function plainError(code: string): string {
-  return PLAIN[code] ?? `Reading from Connect failed (${code.slice(0, 60)}). Observer tries again by itself.`;
+/**
+ * The sentence the owner reads for a failure (never the provider's own message: it can carry untrusted text). `final`: the job
+ * failed for good (a permanent refusal, or the last of 5 tries): the sentence never promises a retry. `retry`: Observer waits
+ * and tries again by itself.
+ */
+export function plainError(code: string, mode: "retry" | "final" = "retry"): string {
+  const c = code.slice(0, 60);
+  const known = PLAIN[code];
+  if (mode === "retry") return known ?? `Reading from Connect failed (${c}). Observer tries again by itself.`;
+  if (PERMANENT_CODES.has(code) && known) return known;
+  return `${known ?? `Reading failed (${c}).`} Observer stopped this job and does not try again by itself: press Try again when the cause is fixed.`;
 }
 
 const OP_REFUSAL: Record<string, { code: string; status: number }> = {

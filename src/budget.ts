@@ -24,6 +24,10 @@ export class CallBudget {
     }
     return Math.max(1, (this.#at[this.#at.length - limit] as number) + 60_000 - now);
   }
+  /** forget every counted call (tests: each starts with a fresh minute) */
+  reset(): void {
+    this.#at = [];
+  }
   get used(): number {
     return this.#at.length;
   }

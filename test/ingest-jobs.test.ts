@@ -22,6 +22,7 @@ import {
   reconcileJobs,
   runGuarded,
   runTick,
+  sharedBudget,
   TICK_BUDGET_MS,
   type TickDeps,
 } from "../src/jobs.ts";
@@ -101,6 +102,7 @@ async function fresh(): Promise<void> {
   fake.addAccount({ id: "acc1", service: "slack", history: false, retentionDays: 30 });
   sdk = new FakeJobs();
   budget = new CallBudget();
+  sharedBudget.reset(); // the op handlers' budget: the test clock does not move by itself
 }
 beforeEach(fresh);
 
@@ -338,7 +340,8 @@ describe("pause, waits and failures", () => {
     assert.deepEqual(waits, [11_250, 22_500, 45_000, 90_000], "half to all of 15 s · 2^(n-1); random = 0.5");
     assert.deepEqual(await runTick(live, deps()), { status: "done" });
     const j = one("SELECT state, consecutive_failures, last_error FROM obs_jobs WHERE id = ?", live);
-    assert.deepEqual([j.state, j.consecutive_failures, j.last_error], ["failed", 5, plainError("upstream_unavailable")]);
+    assert.deepEqual([j.state, j.consecutive_failures, j.last_error], ["failed", 5, plainError("upstream_unavailable", "final")]);
+    assert.ok(!String(j.last_error).includes("tries again by itself") && String(j.last_error).includes("does not try again"), "failed for good never promises a retry");
     assert.deepEqual(await definition.attention?.(db), { code: "jobs_failed", reason: "1 Observer job stopped after repeated failures. Open Sources to see why and try again." });
     assert.equal(fake.pulls(), 6, "the anchor read and 5 tries; nothing more");
     assert.deepEqual(await runTick(live, deps()), { status: "done" });
@@ -369,8 +372,64 @@ describe("pause, waits and failures", () => {
     post("m2", "y", now + 1000);
     await runTick(live, deps());
     assert.deepEqual(ids(source), ["m1", "m2"], "from the fresh anchor on; the missed message is named by the note, not read");
-    await run("backfill_start", { source, since: new Date(T0 - 60 * MIN).toISOString() }, owner());
-    assert.equal(one("SELECT note FROM obs_jobs WHERE id = ?", live).note, null, "a history read clears the note");
+    assert.equal(one("SELECT gap_from FROM obs_jobs WHERE id = ?", live).gap_from, T0, "the gap starts at the last caught-up time");
+  });
+  it("the gap note survives until a history read that COVERS the gap is done (not on start, cancel, or a read after the gap)", async () => {
+    const { source, live } = await addSource();
+    await startLive(live);
+    post("m1", "x", T0 + 1000);
+    await runTick(live, deps()); // caught up at T0
+    now += 30 * MIN;
+    db.prepare("UPDATE obs_jobs SET cursor = ? WHERE id = ?").run("bm90LWEtY3Vyc29y", live);
+    await runTick(live, deps());
+    now += 30 * MIN;
+    await run("job_control", { id: live, action: "resume" }, owner());
+    const note = String(one("SELECT note FROM obs_jobs WHERE id = ?", live).note);
+    assert.match(note, /between 2026-10-17 12:00 UTC and 2026-10-17 13:00 UTC/);
+    const noteNow = () => one("SELECT note FROM obs_jobs WHERE id = ?", live).note;
+    // a read that starts AFTER the gap, done
+    const late = (await run("backfill_start", { source, since: new Date(T0 + 10 * MIN).toISOString() }, owner())).job.id;
+    assert.equal(noteNow(), note, "starting a read does not clear it");
+    assert.deepEqual(await runTick(late, deps()), { status: "done" });
+    assert.equal(noteNow(), note, "a done read that starts after the gap start leaves it");
+    // a covering read, cancelled
+    const cancelled = (await run("backfill_start", { source, since: new Date(T0 - 60 * MIN).toISOString() }, owner())).job.id;
+    await run("job_control", { id: cancelled, action: "cancel" }, owner());
+    assert.equal(noteNow(), note, "a cancelled read leaves it");
+    // a covering read that stops at maxMessages is not done by exhaustion: it leaves it too
+    for (let i = 0; i < 3; i++) post(`b${i}`, "y", T0 + 20 * MIN + i);
+    const capped = (await run("backfill_start", { source, since: new Date(T0 - 60 * MIN).toISOString(), maxMessages: 1 }, owner())).job.id;
+    assert.deepEqual(await runTick(capped, deps({ pageLimit: 1 })), { status: "done" });
+    assert.equal(noteNow(), note, "a read cut by maxMessages leaves it");
+    // a covering read that is done
+    const covering = (await run("backfill_start", { source, since: new Date(T0 - 60 * MIN).toISOString() }, owner())).job.id;
+    assert.deepEqual(await runTick(covering, deps()), { status: "done" });
+    assert.deepEqual(one("SELECT note, gap_from FROM obs_jobs WHERE id = ?", live), { note: null, gap_from: null }, "a covering done read clears it");
+  });
+  it("cursor goes bad mid-backlog: the gap starts at the last CAUGHT-UP time, not at the last page read", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    post("m1", "x", T0 + 1000);
+    await runTick(live, deps()); // exhausted at T0: caught up
+    now += 20 * MIN;
+    for (let i = 0; i < 5; i++) post(`n${i}`, "backlog", now - i * 1000);
+    // the backlog: one page of two, then the cursor goes bad
+    let pages = 0;
+    const d = deps({ pageLimit: 2 });
+    const port = d.port as NonNullable<TickDeps["port"]>;
+    d.port = { ...port, pull: async (q) => {
+      pages += 1;
+      if (pages === 2) throw new TbError("cursor_invalid", "fake cursor_invalid", 400);
+      now += MIN;
+      return port.pull(q);
+    } };
+    await runTick(live, d);
+    const j = one("SELECT state, last_read_at, caught_up_at FROM obs_jobs WHERE id = ?", live);
+    assert.deepEqual([j.state, j.caught_up_at], ["failed", T0]);
+    assert.ok(Number(j.last_read_at) > T0, "a page was read after the caught-up point");
+    now += MIN;
+    await run("job_control", { id: live, action: "resume" }, owner());
+    assert.match(String(one("SELECT note FROM obs_jobs WHERE id = ?", live).note), /between 2026-10-17 12:00 UTC and /);
   });
   it("Try again after cursor_invalid on a LIVE job never imports what came before the source (14 days before source_add)", async () => {
     post("pre", "two weeks before the source existed", T0 - 14 * 24 * 60 * MIN);
@@ -745,5 +804,81 @@ describe("the fake Connect's two change models give the same result", () => {
         ["c", "third, edited", 0],
       ],
     );
+  });
+});
+
+describe("round 2: own errors, one bad record, held reads", () => {
+  it("an error of Observer's own pipeline (a 404 inside the page's checkpoint) is not a Connect refusal: it counts, it does not fail at once", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    post("m1", "x", T0 + 1000);
+    const own = deps({ checkpoint: (_s, w) => db.transaction(() => {
+      const out = w(db);
+      if (count("SELECT COUNT(*) AS c FROM obs_messages") > 0) throw new TbError("not_found", "record not found", 404);
+      return out;
+    }) });
+    assert.equal((await runTick(live, own)).status, "again");
+    const j = one("SELECT state, consecutive_failures, last_error FROM obs_jobs WHERE id = ?", live);
+    assert.deepEqual([j.state, j.consecutive_failures], ["waiting", 1]);
+    assert.match(String(j.last_error), /tries again by itself/);
+    // fire-on-bad: the same 404 from CONNECT is permanent, and its sentence promises no retry
+    now = Number(one("SELECT retry_at FROM obs_jobs WHERE id = ?", live).retry_at);
+    fake.fail("data_pull", "dataset_gone", 404);
+    assert.deepEqual(await runTick(live, deps()), { status: "done" });
+    const f = one("SELECT state, last_error FROM obs_jobs WHERE id = ?", live);
+    assert.equal(f.state, "failed");
+    assert.ok(String(f.last_error).includes("does not try again by itself") && !String(f.last_error).includes("tries again by itself"));
+    assert.equal(plainError("since_invalid", "final"), plainError("since_invalid"), "a permanent refusal's own sentence already says what to do");
+  });
+  it("one record whose routing always throws is held for the owner; the cursor advances and later messages are stored and windowed", async () => {
+    const { source, live } = await addSource();
+    await startLive(live);
+    const poisonRecord = (id: unknown): boolean => !!db.prepare("SELECT 1 AS x FROM obs_messages WHERE record_id = ? AND provider_msg_id = 'poison'").get(String(id));
+    const proxy = {
+      ...db,
+      prepare(sql: string) {
+        const st = db.prepare(sql);
+        if (!sql.startsWith("UPDATE obs_records SET pii_json = ?, secret = ?, actionable = ?, rule_id = ?")) return st;
+        return {
+          run: (...a: unknown[]) => {
+            if (poisonRecord(a[a.length - 1])) throw new TbError("not_found", "record not found", 404);
+            return st.run(...(a as never[]));
+          },
+          get: (...a: unknown[]) => st.get(...(a as never[])),
+          all: (...a: unknown[]) => st.all(...(a as never[])),
+        };
+      },
+    } as unknown as Db;
+    const d = () => deps({ db: proxy });
+    post("poison", "this record cannot be routed", T0 + 1000, { thread: "T1" });
+    post("good", "this one can", T0 + 2000, { thread: "T2" });
+    await runTick(live, d());
+    now += 31 * MIN;
+    await runTick(live, d());
+    const states = db.prepare("SELECT m.provider_msg_id AS id, r.state, r.problem, r.pii_json FROM obs_messages m JOIN obs_records r ON r.id = m.record_id ORDER BY m.provider_msg_id").all().map((r) => ({ ...r }));
+    assert.deepEqual(states.map((r) => [r.id, r.state, r.problem]), [["good", "review", null], ["poison", "review", "routing_failed"]]);
+    assert.equal(JSON.parse(String(states[1]?.pii_json)).suspect_secret, 1, "held as a possible secret: never delivered automatically");
+    assert.deepEqual(one("SELECT state, consecutive_failures FROM obs_jobs WHERE id = ?", live), { state: "waiting", consecutive_failures: 0 }, "the job is not stalled");
+    const cursor = one("SELECT cursor FROM obs_jobs WHERE id = ?", live).cursor;
+    post("later", "after the bad one", now, { thread: "T3" });
+    now += MIN;
+    await runTick(live, d());
+    now += 31 * MIN;
+    await runTick(live, d());
+    assert.notEqual(one("SELECT cursor FROM obs_jobs WHERE id = ?", live).cursor, cursor, "the cursor advanced");
+    assert.equal(one("SELECT r.state FROM obs_messages m JOIN obs_records r ON r.id = m.record_id WHERE m.provider_msg_id = 'later'").state, "review", "later messages are windowed and routed");
+    assert.deepEqual(ids(source), ["good", "later", "poison"], "no message dropped");
+    const review = await run("review_list", {}, owner());
+    assert.equal(review.items.length, 3, "the bad record is visible to the owner in Review");
+  });
+  it("a read Connect holds raises attention in one line (no text); a failed job wins", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    assert.equal(jobsAttention(db), null);
+    fake.fail("data_pull", "connect_held", 409);
+    await runTick(live, deps());
+    assert.deepEqual(jobsAttention(db), { code: "jobs_held", reason: "1 Observer read waits for your approval in Holds." });
+    db.prepare("UPDATE obs_jobs SET state = 'failed' WHERE id = ?").run(live);
+    assert.equal(jobsAttention(db)?.code, "jobs_failed");
   });
 });

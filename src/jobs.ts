@@ -32,7 +32,7 @@ import { toIncoming } from "./contract.ts";
 import { storeMessage } from "./ingest.ts";
 import { applyRouting } from "./pipeline.ts";
 import { attachWindow } from "./records.ts";
-import { jobRow, type Row, recordRow, sourceRow } from "./store.ts";
+import { jobRow, parsePii, type Row, recordRow, sourceRow } from "./store.ts";
 import { backfillWindows, liveWindows, type WindowMessage } from "./window.ts";
 
 export { CALLS_PER_MINUTE, LIVE_RESERVE } from "./budget.ts";
@@ -112,8 +112,12 @@ function query(job: Row, src: Row, limit = PAGE_LIMIT): PullQuery {
   };
 }
 
-/** A failed pull, page or tick: a wait, a failure that counts, or a refusal that fails the job at once. */
-export function fail(d: TickDeps, job: Row, e: unknown, at: number): JobOutcome {
+/**
+ * A failed pull, page or tick: a wait, a failure that counts, or a refusal that fails the job at once. `origin`: only an answer
+ * of CONNECT can be a permanent refusal; an error of Observer's own pipeline (storeMessage, windowing, routing; e.g. a 404 of
+ * notFound) always counts towards the 5 instead.
+ */
+export function fail(d: TickDeps, job: Row, e: unknown, at: number, origin: "connect" | "own" = "connect"): JobOutcome {
   const code = e instanceof TbError ? e.code : "error";
   if (code === "job_lease_lost") throw e;
   if (d.signal?.aborted) return again(0); // the SDK gives this run back; nothing is written
@@ -130,16 +134,24 @@ export function fail(d: TickDeps, job: Row, e: unknown, at: number): JobOutcome 
   if (code === "rate_limited") return waitWithout(Math.max(RATE_LIMIT_MIN_MS, backoffMs(failures + 1, d.random)), plainError(code));
   if (code === "connect_held") return waitWithout(HELD_RECHECK_MS, plainError(code));
   const next = failures + 1;
-  const message = plainError(code);
-  if (isPermanent(e) || next >= MAX_FAILURES) {
-    setState(d, job, "state = 'failed', consecutive_failures = ?, last_error = ?, error_code = ?, retry_at = NULL", [next, message, code.slice(0, 64)], at);
+  const sentence = (mode: "retry" | "final"): string => (origin === "own" ? ownError(code, mode) : plainError(code, mode));
+  if ((origin === "connect" && isPermanent(e)) || next >= MAX_FAILURES) {
+    setState(d, job, "state = 'failed', consecutive_failures = ?, last_error = ?, error_code = ?, retry_at = NULL", [next, sentence("final"), code.slice(0, 64)], at);
     d.statusChanged?.();
     return DONE;
   }
   const wait = backoffMs(next, d.random);
-  setState(d, job, "state = 'waiting', consecutive_failures = ?, last_error = ?, error_code = ?, retry_at = ?", [next, message, code.slice(0, 64), at + wait], at);
+  setState(d, job, "state = 'waiting', consecutive_failures = ?, last_error = ?, error_code = ?, retry_at = ?", [next, sentence("retry"), code.slice(0, 64), at + wait], at);
   d.statusChanged?.();
   return again(wait);
+}
+
+/** The sentence for an error of Observer's own pipeline (never a Connect sentence: Connect answered fine). */
+export function ownError(code: string, mode: "retry" | "final"): string {
+  const c = code.slice(0, 60);
+  return mode === "retry"
+    ? `Observer could not store or sort what it read (${c}). It tries again by itself.`
+    : `Observer could not store or sort what it read (${c}). It stopped this job and does not try again by itself: press Try again.`;
 }
 
 /** Write one page: every message, its windows and records, the cursor, the counts and the job's next state, in the ONE
@@ -161,6 +173,17 @@ function commitPage(d: TickDeps, job: Row, rows: ReturnType<typeof toIncoming>[]
       .run(nextCursor, stored, skipped, at, next.retryAt, next.state, at, id).changes;
     // paused or cancelled while the page was on its way: nothing of it is kept, the cursor stays (the next run re-reads it)
     if (ok === 0) throw new TbError("job_not_active", "the job was stopped while the page was read", 409);
+    // live: an exhausted page is a caught-up point (a later restart's gap starts here)
+    if (job.kind === "live" && next.state === "waiting") db.prepare("UPDATE obs_jobs SET caught_up_at = ? WHERE id = ?").run(at, id);
+    // a history read that is DONE and covers a restarted live job's gap (since <= gap start, end >= the fresh anchor) clears
+    // its note; starting, cancelling or a read that begins after the gap leave it
+    if (job.kind === "backfill" && next.state === "done" && job.since_at !== null && job.until_at !== null) {
+      db.prepare("UPDATE obs_jobs SET note = NULL, gap_from = NULL WHERE source_id = ? AND kind = 'live' AND gap_from IS NOT NULL AND gap_from >= ? AND anchor_at <= ?").run(
+        source,
+        Number(job.since_at),
+        Number(job.until_at),
+      );
+    }
     const created = windowSource(db, source, job.kind === "backfill" ? "backfill" : "live", at);
     if (created > 0) db.prepare("UPDATE obs_jobs SET record_count = record_count + ? WHERE id = ?").run(created, id);
     return stored;
@@ -170,7 +193,9 @@ function commitPage(d: TickDeps, job: Row, rows: ReturnType<typeof toIncoming>[]
 /**
  * Windows → records → classify → route for the messages a source has not given a record yet (live: also the messages of its
  * open records, so a live window grows until it closes). Closed windows are routed through the pipeline. Returns the number of
- * new records. It runs inside the page's checkpoint (attachWindow and applyRouting nest as savepoints).
+ * new records. It runs inside the page's checkpoint. Each window is its own savepoint: one window whose windowing or routing
+ * throws (an error of Observer's own pipeline) is held for the owner (holdForOwner) and the rest of the page goes on, so one
+ * bad record never stalls the source; its messages are never dropped.
  */
 export function windowSource(db: Db, sourceId: string, kind: "live" | "backfill", at: number): number {
   const open = kind === "live" ? " OR r.state = 'open'" : "";
@@ -185,13 +210,39 @@ export function windowSource(db: Db, sourceId: string, kind: "live" | "backfill"
   const windows = kind === "live" ? liveWindows(msgs, at) : backfillWindows(msgs, { now: at });
   let created = 0;
   for (const w of windows) {
-    const a = attachWindow(db, sourceId, w, at);
-    if (a.created) created += 1;
-    if (!w.closed) continue;
-    const state = str(recordRow(db, a.recordId)?.state);
-    if (state === "open" || state === "classified") applyRouting(db, a.recordId, at);
+    try {
+      created += db.transaction(() => {
+        const a = attachWindow(db, sourceId, w, at);
+        if (w.closed) {
+          const state = str(recordRow(db, a.recordId)?.state);
+          if (state === "open" || state === "classified") applyRouting(db, a.recordId, at);
+        }
+        return a.created ? 1 : 0;
+      });
+    } catch {
+      try {
+        created += db.transaction(() => {
+          const a = attachWindow(db, sourceId, w, at);
+          holdForOwner(db, a.recordId, at);
+          return a.created ? 1 : 0;
+        });
+      } catch {
+        // even the window cannot be attached: its messages stay stored without a record and the next page tries again
+      }
+    }
   }
   return created;
+}
+
+export const RECORD_PROBLEM = "routing_failed";
+/** A record Observer could not route: in Review, held as a possible secret (never delivered automatically, opens redacted),
+ *  with a fixed reason. */
+export function holdForOwner(db: Db, recordId: string, at: number): void {
+  const rec = recordRow(db, recordId);
+  if (!rec) return;
+  const pii = parsePii(rec.pii_json);
+  pii.suspect_secret = Math.max(pii.suspect_secret ?? 0, 1);
+  db.prepare("UPDATE obs_records SET state = 'review', problem = ?, pii_json = ?, updated_at = ? WHERE id = ? AND state IN ('open', 'classified')").run(RECORD_PROBLEM, JSON.stringify(pii), at, recordId);
 }
 
 /** One tick of an Observer job. Pure over its deps (tests drive it with a fake checkpoint, a fake Connect and the test clock). */
@@ -244,7 +295,8 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     } catch (e) {
       // nothing of the page was kept (one transaction); a lost lease is the SDK's (fail rethrows it), a stopped job just ends
       if (e instanceof TbError && e.code === "job_not_active") return DONE;
-      return fail(d, fresh, e, at);
+      // Connect's answer was fine: what failed is Observer's own (storing, windowing): never a permanent refusal
+      return fail(d, fresh, e, at, "own");
     }
     d.statusChanged?.();
     if (finished) return kind === "backfill" ? DONE : again(interval);
@@ -260,7 +312,7 @@ export async function runGuarded(jobId: string, d: TickDeps): Promise<JobOutcome
     const job = jobRow(d.db, jobId);
     if (!job || !ACTIVE.has(str(job.state))) return DONE;
     try {
-      return fail(d, job, e, clockNow());
+      return fail(d, job, e, clockNow(), "own");
     } catch (inner) {
       if (inner instanceof TbError && inner.code === "job_lease_lost") throw inner;
       return again(backoffMs(Number(job.consecutive_failures) + 1, d.random));
@@ -325,8 +377,11 @@ export function reconcileJobs(jobs: JobsApi | null, db: Db, at: number): void {
 /** Failed jobs need the owner (L3): the app's attention while any is failed. */
 export function jobsAttention(db: Db): { code: string; reason: string } | null {
   const n = Number(db.prepare("SELECT COUNT(*) AS c FROM obs_jobs WHERE state = 'failed'").get()?.c ?? 0);
-  if (n === 0) return null;
-  return { code: "jobs_failed", reason: `${n} Observer job${n === 1 ? "" : "s"} stopped after repeated failures. Open Sources to see why and try again.` };
+  if (n > 0) return { code: "jobs_failed", reason: `${n} Observer job${n === 1 ? "" : "s"} stopped after repeated failures. Open Sources to see why and try again.` };
+  // a read Connect holds for the owner waits for a decision: one line, no text of the read
+  const held = Number(db.prepare("SELECT COUNT(*) AS c FROM obs_jobs WHERE state = 'waiting' AND error_code = 'connect_held'").get()?.c ?? 0);
+  if (held > 0) return { code: "jobs_held", reason: `${held} Observer read${held === 1 ? " waits" : "s wait"} for your approval in Holds.` };
+  return null;
 }
 
 /** The SDK job spec of both kinds: input `{ job: <obs job id> }`. */
