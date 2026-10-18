@@ -27,8 +27,20 @@ describe("Sources", () => {
     for (const b of ["Pause live", "Pause history", "Stop history", "Remove"]) control(gmail, b);
     const tg = card(m.host, "Clinic partners");
     assert.deepEqual([...tg.querySelectorAll(".tb-tag")].map((t) => t.textContent), ["Waiting"]);
-    assert.match(tg.textContent ?? "", /No history: Telegram bots see only messages sent after they join\./);
-    assert.ok(![...tg.querySelectorAll("button")].some((b) => b.textContent === "Read history…"), "a Telegram source offers no history");
+    // what a source can read comes from Connect's catalog (history false), not from the service name
+    assert.match(tg.textContent ?? "", /Observer reads from the time you share it, plus what Connect kept \(up to 30 days\)\./);
+    assert.ok(!(gmail.textContent ?? "").includes("what Connect kept"), "a source with history does not say it");
+    control(tg, "Read history…");
+    await m.unmount();
+  });
+  it("Read history… on a source without history says what Connect kept and how far back it reaches", async () => {
+    reset();
+    const m = await mount(h(await page(), {}));
+    await click(control(card(m.host, "Clinic partners"), "Read history…"));
+    const dialog = openDialog(m.host);
+    assert.match(dialog.textContent ?? "", /plus what Connect kept \(up to 30 days\)\./);
+    assert.match(dialog.textContent ?? "", /Connect keeps messages for up to 30 days: older ones cannot be read\./);
+    assert.ok(!(dialog.textContent ?? "").includes("three years"));
     await m.unmount();
   });
 
@@ -265,18 +277,20 @@ describe("Add source", () => {
     await m.unmount();
   });
 
-  it("a source that reads no history says so on step 4 and offers Done", async () => {
+  it("a source without history says what Connect kept (step 1 and step 4) and can still read that, or skip it", async () => {
     reset();
     const m = await mountFlow();
     const dialog = openDialog(m.host);
+    assert.match(dialog.textContent ?? "", /Front desk bot.*Observer reads from the time you share it, plus what Connect kept \(up to 30 days\)\./s);
     await click(dialog.querySelectorAll('[role="radio"]')[1] as Element);
     await next(dialog);
     await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
     await next(dialog);
     await next(dialog, "Add source");
-    assert.match(step(dialog, 3).textContent ?? "", /No history: this source gives Observer only messages sent from now on\./);
-    assert.equal(step(dialog, 3).querySelector('input[name="since"]'), null);
-    await next(dialog, "Done");
+    assert.match(step(dialog, 3).textContent ?? "", /Observer reads from the time you share it, plus what Connect kept \(up to 30 days\)\./);
+    assert.match(step(dialog, 3).textContent ?? "", /Connect keeps messages for up to 30 days: older ones cannot be read\./);
+    assert.ok(step(dialog, 3).querySelector('input[name="since"]'), "the start date of what Connect kept");
+    await next(dialog, "Skip, no history");
     assert.equal(callsOf("backfill_start").length, 0);
     await m.unmount();
   });
@@ -295,6 +309,25 @@ describe("Add source", () => {
     assert.ok(control(dialog, "Add source"), "still on step 3");
     assert.equal(callsOf("backfill_start").length, 0);
     await m.unmount();
+  });
+
+  it("Connect's refusals of the add read as plain sentences (caller_unverified, a catalog-only share)", async () => {
+    for (const [code, status, text] of [
+      ["caller_unverified", 403, "Connect could not verify that the caller is Observer, so it shared nothing. Ask the workspace owner to update Observer and Connect."],
+      ["account_list_only", 403, "Connect shares this account for its list only. Share it for reading in Connect, then try again."],
+    ] as const) {
+      reset();
+      stub.fail.source_add = { status, code };
+      const m = await mountFlow();
+      const dialog = openDialog(m.host);
+      await click(dialog.querySelector('[role="radio"]') as Element);
+      await next(dialog);
+      await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
+      await next(dialog);
+      await next(dialog, "Add source");
+      assert.deepEqual(alerts(dialog), [text], code);
+      await m.unmount();
+    }
   });
 
   it("parseExclude sorts addresses, handles and domains", async () => {

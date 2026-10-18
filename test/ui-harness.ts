@@ -103,8 +103,8 @@ export const DELIVERIES = [
 ];
 export const PRIVACY = { textRetentionDays: 30, reviewRetentionDays: 90, onSourceDelete: "purge" };
 export const ACCOUNTS = [
-  { id: "acc_gmail", kind: "gmail", label: "work@example.com", historyCapable: true, conversations: [{ id: "clients", title: "Label “Clients”", estimate: 28500 }, { id: "suppliers", title: "Label “Suppliers”", estimate: 4100 }, { id: "all", title: "Inbox (all mail)", estimate: null }] },
-  { id: "acc_tg", kind: "telegram", label: "Front desk bot", historyCapable: false, conversations: [{ id: "group", title: "Clinic partners", estimate: null }] },
+  { id: "acc_gmail", kind: "gmail", label: "work@example.com", historyCapable: true, retentionDays: null, conversations: [{ id: "clients", title: "Label “Clients”", estimate: 28500 }, { id: "suppliers", title: "Label “Suppliers”", estimate: 4100 }, { id: "all", title: "Inbox (all mail)", estimate: null }] },
+  { id: "acc_tg", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "group", title: "Clinic partners", estimate: null }] },
 ];
 
 // ── stub server ────────────────────────────────────────────────────────────

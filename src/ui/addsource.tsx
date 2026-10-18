@@ -2,7 +2,7 @@
 // Next of step 3 (source_add), with its live job paused: nothing is read until the owner presses Start live (DESIGN §3.2).
 import { Choices, Field, Notice, Select, StepFlow, Textarea, TextInput } from "@opt2-tealbrick/ui";
 import { useState } from "react";
-import { type ConnectAccount, count, everyLabel, kindName, plural, run } from "./api.ts";
+import { type ConnectAccount, count, everyLabel, keptSentence, kindName, plural, run } from "./api.ts";
 import { Check, Failure, useAct } from "./common.tsx";
 import { HistoryFields, useHistory } from "./history.tsx";
 
@@ -34,7 +34,9 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
   const make = useAct();
   const account = accounts.find((a) => a.id === accountId) ?? null;
   const history = useHistory(created?.id ?? null);
-  const canHistory = account?.historyCapable === true && account.kind !== "telegram";
+  // every source can read history: with `history` from Connect's catalog it reaches back further, without it Observer reads
+  // what Connect kept (kinds and capabilities come from Connect, not from a list of services)
+  const canHistory = account !== null;
 
   const chooseAccount = (id: string) => {
     setAccountId(id);
@@ -86,7 +88,7 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
                   label="Account"
                   value={accountId}
                   onChange={chooseAccount}
-                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: `${kindName(a.kind)} · ${plural(a.conversations.length, "conversation")}`, ...(a.historyCapable ? {} : { note: "Reads new messages only: no history." }) }))}
+                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: `${kindName(a.kind)} · ${plural(a.conversations.length, "conversation")}`, ...(a.historyCapable ? {} : { note: keptSentence(a.retentionDays) }) }))}
                 />
               )}
             </div>
@@ -143,7 +145,8 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
               <Failure message={history.error} />
               <h3>Should Observer read older messages?</h3>
               <p className="tb-soft">The source is added. Live watching is off until you press Start live on the source.</p>
-              {canHistory ? <HistoryFields h={history} /> : <p className="tb-soft">No history: this source gives Observer only messages sent from now on.</p>}
+              {account && !account.historyCapable ? <p className="tb-soft">{keptSentence(account.retentionDays)}</p> : null}
+              {canHistory ? <HistoryFields h={history} keptDays={account?.historyCapable === false ? account.retentionDays : undefined} /> : null}
             </div>
           ),
         },

@@ -104,9 +104,16 @@ export interface ConnectAccount {
   id: string;
   kind: string;
   label: string;
+  /** false: Connect cannot page further back than what it kept (every source of Connect 0.6.0) */
   historyCapable: boolean;
+  /** how many days Connect keeps what it received; null when it does not say */
+  retentionDays: number | null;
   conversations: ConnectConversation[];
 }
+
+/** What a source without history reads (the agreed sentence). */
+export const keptSentence = (days: number | null): string =>
+  `Observer reads from the time you share it, plus what Connect kept${days === null ? "" : ` (up to ${days} day${days === 1 ? "" : "s"})`}.`;
 
 // ── calls ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -163,8 +170,12 @@ export function explain(e: unknown): string {
       return "Give the source a name.";
     case "sources_limit":
       return "Observer holds no more sources. Remove one first.";
-    case "history_unsupported":
-      return "This source cannot read history. It reads only new messages.";
+    case "account_list_only":
+      return "Connect shares this account for its list only. Share it for reading in Connect, then try again.";
+    case "caller_unverified":
+      return "Connect could not verify that the caller is Observer, so it shared nothing. Ask the workspace owner to update Observer and Connect.";
+    case "no_access":
+      return "Connect refused Observer as a caller of its data operations.";
     case "since_too_old":
       return "History reaches back three years at most. Pick a later date.";
     case "range_invalid":
@@ -313,6 +324,7 @@ export const asAccount = (v: unknown): ConnectAccount => {
     kind: String(a.kind ?? ""),
     label: String(a.label ?? a.id ?? ""),
     historyCapable: a.historyCapable !== false,
+    retentionDays: typeof a.retentionDays === "number" && Number.isInteger(a.retentionDays) && a.retentionDays >= 0 ? a.retentionDays : null,
     conversations: Array.isArray(a.conversations) ? a.conversations.map((c) => ({ id: String(c?.id ?? ""), title: String(c?.title ?? c?.id ?? ""), estimate: typeof c?.estimate === "number" ? c.estimate : null })) : [],
   };
 };
