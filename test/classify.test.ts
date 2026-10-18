@@ -14,6 +14,7 @@ import { detectSecrets } from "../src/detect/secret.ts";
 import { detectSpecial } from "../src/detect/special.ts";
 import { detectSuspect } from "../src/detect/suspect.ts";
 import { joinedSecretScan } from "../src/records.ts";
+import { quadraticStub, RATIO_LIMIT, scaling } from "./perf.ts";
 
 describe("redaction", () => {
   it("replaces each class with its label", () => {
@@ -122,19 +123,11 @@ describe("actionable scorer", () => {
   });
 });
 
-describe("time budget", () => {
+describe("time budget (load-robust: scaling, not wall clock; test/perf.ts)", () => {
   const prose =
     "Hi team, please send me the report by Friday. Anna (anna@example.com, +421 911 123 456) said the meeting at 10 Downing Street moved to 2026-10-17 12:30. Order 12345678 shipped; invoice 2026-0001234. The password is hunter2 and she has cancer. Costs: DE89 3704 0044 0532 0130 00, card 4111 1111 1111 1111, SSN 123-45-6789. Version 1.2.3.4 build 20261017 uuid 123e4567-e89b-12d3-a456-426614174000. ";
-  const fill = (seed: string) => seed.repeat(Math.ceil(16384 / seed.length)).slice(0, 16384);
-  const median = (f: () => unknown, runs = 50): number => {
-    const t: number[] = [];
-    for (let i = 0; i < runs; i++) {
-      const s = performance.now();
-      f();
-      t.push(performance.now() - s);
-    }
-    return t.sort((a, b) => a - b)[Math.floor(runs / 2)] as number;
-  };
+  const fillTo = (seed: string, n: number) => seed.repeat(Math.ceil(n / seed.length)).slice(0, n);
+  const fill = (seed: string) => fillTo(seed, 16384);
   // shapes made to hurt a regex or a quadratic loop: long runs, nested repeats, many candidates, many separators, non-ASCII, format characters
   const SHAPES = [
     prose, "1234 5678 90 ", "12-34-56-78 ", "a@", "a.b@c.d ", "a@a@a@a@", "a.", "abcdefghij", "-----BEGIN X-----", "eyJabcdefgh.", "DE89 AB12 ", "lorem ipsum dolor sit amet cancer ",
@@ -146,31 +139,40 @@ describe("time budget", () => {
   const DETECTORS: [string, (t: string) => unknown][] = [
     ["secrets", detectSecrets], ["email", detectEmails], ["phone", detectPhones], ["iban", detectIbans], ["card", detectCards], ["govid", detectGovIds], ["address", detectAddresses], ["special", detectSpecial], ["suspect", detectSuspect],
   ];
-  it("each detector handles 16 KiB of hostile text in under 20 ms (median of 25 runs)", () => {
+  it("each detector scales linearly on hostile text: 4 KiB vs 16 KiB of every shape (ratio < 8, 16 KiB median < 250 ms)", () => {
     for (const shape of SHAPES) {
-      const text = fill(shape);
-      assert.equal(text.length, 16384);
+      assert.equal(fill(shape).length, 16384);
       for (const [name, detect] of DETECTORS) {
-        const m = median(() => detect(text), 25);
-        assert.ok(m < 20, `${name} on ${JSON.stringify(shape.slice(0, 24))}: median ${m.toFixed(2)} ms`);
+        const r = scaling(detect, fillTo(shape, 4096), fill(shape), { ceilingMs: 250, runs: 5 });
+        assert.ok(r.ok, `${name} on ${JSON.stringify(shape.slice(0, 24))}: ${r.why}`);
       }
     }
   });
-  it("classifying a 16 KiB message takes under 20 ms (median of 50 runs), on every shape", () => {
-    assert.equal(fill(prose).length, 16384);
+  it("classifying scales linearly on every shape (4 KiB vs 16 KiB, ratio < 8, 16 KiB median < 250 ms)", () => {
     for (const s of SHAPES) {
-      const m = median(() => classifyText(fill(s)), 50);
-      assert.ok(m < 20, `${JSON.stringify(s.slice(0, 20))}: median ${m.toFixed(2)} ms`);
+      const r = scaling(classifyText, fillTo(s, 4096), fill(s), { ceilingMs: 250, runs: 7 });
+      assert.ok(r.ok, `${JSON.stringify(s.slice(0, 20))}: ${r.why}`);
     }
   });
-  it("the whole pipeline for a 16 KiB message (clean, classify, route) stays under 40 ms", () => {
-    assert.ok(median(() => classifyRecord([fill(prose)]), 50) < 40);
+  it("the whole pipeline for a message (clean, classify, route) scales linearly (4 vs 16 KiB, 16 KiB median < 250 ms)", () => {
+    const r = scaling((t) => classifyRecord([t]), fillTo(prose, 4096), fill(prose), { ceilingMs: 250, runs: 9 });
+    assert.ok(r.ok, r.why);
   });
-  it("the joined scan of a 64 KiB record (16 messages of 4 KiB: three joins, every seam) takes under 250 ms (median of 25), on every shape", () => {
+  it("the joined scan scales linearly: a record of 4 vs 16 messages of 4 KiB (three joins, every seam), 64 KiB median < 1000 ms", () => {
     for (const s of [prose, ...SHAPES.slice(1, 12), "password: ", "api_key_", "-p "]) {
-      const parts = Array.from({ length: 16 }, () => fill(s).slice(0, 4096));
-      const m = median(() => joinedSecretScan(parts), 25);
-      assert.ok(m < 250, `${JSON.stringify(s.slice(0, 20))}: median ${m.toFixed(1)} ms`);
+      const msg = fill(s).slice(0, 4096);
+      const parts = (n: number) => Array.from({ length: n }, () => msg);
+      // the input is a record, so the measured function takes the count of messages through a string key
+      const r = scaling((k) => joinedSecretScan(parts(k.length)), "x".repeat(4), "x".repeat(16), { ceilingMs: 1000, runs: 5 });
+      assert.ok(r.ok, `${JSON.stringify(s.slice(0, 20))}: ${r.why}`);
     }
+  });
+  it("fire-on-bad: a deliberately quadratic detector fails the guard; a linear one passes it (at any load)", () => {
+    const shape = "a@a@a@a@";
+    const bad = scaling(quadraticStub, fillTo(shape, 4096), fill(shape), { ceilingMs: 250, runs: 3 });
+    assert.equal(bad.ok, false, bad.why);
+    assert.ok(bad.ratio > RATIO_LIMIT || bad.big >= 250, bad.why);
+    const good = scaling((t) => t.split("").filter((c) => c === "@").length, fillTo(shape, 4096 * 8), fillTo(shape, 16384 * 8), { ceilingMs: 250, runs: 5 });
+    assert.equal(good.ok, true, good.why);
   });
 });
