@@ -37,11 +37,18 @@ describe("Sources", () => {
     reset();
     const note = "Observer restarted reading from now. Messages between 2026-10-17 12:00 UTC and 2026-10-17 19:01 UTC may be missing: start a history read to fill them.";
     stub.jobs = (stub.jobs as Record<string, unknown>[]).map((j) =>
-      j.id === "job_gmail_live" ? { ...j, note } : j.id === "job_tg_live" ? { ...j, lastError: "Connect holds this read for your approval." } : j,
+      j.id === "job_gmail_live"
+        ? { ...j, note }
+        : j.id === "job_tg_live"
+          ? { ...j, lastError: "Connect holds this read for your approval." }
+          : j.id === "job_gmail_hist"
+            ? { ...j, state: "waiting", lastError: "Connect is busy. Observer waits and tries again by itself." }
+            : j,
     );
     const m = await mount(h(await page(), {}));
     assert.ok((card(m.host, "Work inbox").textContent ?? "").includes(note));
-    assert.ok((card(m.host, "Clinic partners").textContent ?? "").includes("Connect holds this read for your approval."));
+    assert.ok((card(m.host, "Clinic partners").textContent ?? "").includes("Live: Connect holds this read for your approval."));
+    assert.ok((card(m.host, "Work inbox").textContent ?? "").includes("History: Connect is busy. Observer waits and tries again by itself."), "a waiting history job says why too");
     assert.ok(!(card(m.host, "Clinic partners").textContent ?? "").includes("restarted"), "quiet on good: no note, no line");
     await m.unmount();
   });

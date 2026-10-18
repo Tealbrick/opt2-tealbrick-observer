@@ -102,7 +102,8 @@ function SourceCard({
       </dl>
       {live?.state === "failed" && live.lastError ? <p className="tb-hint">Last error: {live.lastError}</p> : null}
       {hist?.state === "failed" && hist.lastError ? <p className="tb-hint">History error: {hist.lastError}</p> : null}
-      {live?.lastError && live.state === "waiting" ? <p className="tb-hint">{live.lastError}</p> : null}
+      {live?.lastError && live.state === "waiting" ? <p className="tb-hint">Live: {live.lastError}</p> : null}
+      {hist?.lastError && hist.state === "waiting" ? <p className="tb-hint">History: {hist.lastError}</p> : null}
       {live?.note ? <p className="tb-hint">{live.note}</p> : null}
       <div className="tb-ctas">
         {live && ["running", "queued", "waiting"].includes(live.state) ? (
