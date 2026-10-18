@@ -1,0 +1,9 @@
+# Exact gitleaks fingerprints of SYNTHETIC detector test vectors in history (S3 branch commits, before the
+# vectors were built at run time). Checked 2026-10-18 by the Observer lead without printing them:
+# - jwt: jwt.io-style sample tokens (HS256, payload {"sub":"1234567890"...}); no signing key exists anywhere.
+# - private-key: PEM bodies of 45 and 15 bytes that parse as no key (pkcs8, pkcs1, sec1 all fail).
+# Never a used credential. Current files build these vectors at run time; new hits are NOT covered here.
+462da628c5aef20db5b109bb7829c0fe9ac5d22c:test/ingest.test.ts:jwt:18
+462da628c5aef20db5b109bb7829c0fe9ac5d22c:test/ingest.test.ts:private-key:19
+176d2ee19ec06d0a86c23e38a3035e729078bebe:test/detect.test.ts:jwt:31
+176d2ee19ec06d0a86c23e38a3035e729078bebe:test/detect.test.ts:private-key:35
