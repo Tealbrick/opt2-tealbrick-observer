@@ -6,8 +6,9 @@
 // byte copy of messages/1 (test/contracts/messages.1.schema.json, sha256 in PROVENANCE.md) with the validator Connect uses
 // (validateAgainstSchema from @opt2-tealbrick/manifest). A page that does not conform makes the fake THROW: the fake cannot drift.
 //
-// Shapes mirrored: per-ACCOUNT pull in `rev` order (all conversations); an edit or a deletion is a NEW row with the same
-// (conversation, id) and a later rev; `deleted: true` rows have empty text and no attachments; the cursor is opaque; a forward page
+// Shapes mirrored: per-ACCOUNT pull in `rev` order (all conversations); an edit or a deletion gives the message a later rev.
+// Two models of that, and Observer must end the same under both: `inplace` (Connect's own: the SAME log row is updated and moves
+// to the next rev, channels/service.ts markEdited / markDeleted) and `append` (a NEW row with the same (conversation, id)); `deleted: true` rows have empty text and no attachments; the cursor is opaque; a forward page
 // keeps its cursor when exhausted; backward without a history reader answers { rows: [], exhausted: true }; `anchor` (head) only
 // on a call without a cursor; a rate limit answers empty rows, the same cursor and `retryAfterS`; a stored row that does not
 // conform is quarantined (skipped, counted). Refusals keyed on the VERIFIED caller product: caller_unverified 403, not_found 404
@@ -87,6 +88,8 @@ export class FakeConnect {
   drift: ((page: Record<string, unknown>) => void) | null = null;
   /** mutates the answer AFTER the check: a Connect that breaks its own contract (only to test Observer's reader) */
   onTheWire: ((out: Record<string, unknown>) => void) | null = null;
+  /** how an edit or a deletion lands in the log (see the header) */
+  changes: "inplace" | "append" = "inplace";
   readonly #rev = new Map<string, number>();
 
   addAccount(a: Partial<FakeAccount> & { id: string }): FakeAccount {
@@ -109,11 +112,21 @@ export class FakeConnect {
     return full;
   }
 
-  #append(account: string, row: Omit<LogRow, "rev">): number {
+  #nextRev(account: string): number {
     const rev = (this.#rev.get(account) ?? 0) + 1;
     this.#rev.set(account, rev);
+    return rev;
+  }
+  #append(account: string, row: Omit<LogRow, "rev">): number {
+    const rev = this.#nextRev(account);
     (this.logs.get(account) as LogRow[]).push({ ...row, rev });
     return rev;
+  }
+  /** an edit or a deletion: in place (the row takes the next rev) or as a new row */
+  #change(account: string, old: LogRow, change: Partial<LogRow>): number {
+    if (this.changes === "append") return this.#append(account, { ...old, ...change });
+    Object.assign(old, change, { rev: this.#nextRev(account) });
+    return old.rev;
   }
 
   /** a new message: the next rev */
@@ -138,15 +151,15 @@ export class FakeConnect {
     if (!r) throw new Error(`fake: no message ${conversation}/${id}`);
     return r;
   }
-  /** an edit: a NEW row with the same (conversation, id), a later rev and editedAt */
+  /** an edit: a later rev with the new text and editedAt (Connect keeps receivedAt; the append model too) */
   edit(account: string, conversation: string, id: string, text: string, editedAt: number): number {
     const old = this.#last(account, conversation, id);
-    return this.#append(account, { ...old, text, editedAt, receivedAt: editedAt });
+    return this.#change(account, old, { text, editedAt });
   }
-  /** a provider deletion: a NEW row, deleted, empty text, no attachments */
-  remove(account: string, conversation: string, id: string, at: number): number {
+  /** a provider deletion: a later rev, deleted, empty text, no attachments */
+  remove(account: string, conversation: string, id: string, _at: number): number {
     const old = this.#last(account, conversation, id);
-    return this.#append(account, { ...old, text: "", attachments: [], deleted: true, receivedAt: at, editedAt: old.editedAt });
+    return this.#change(account, old, { text: "", attachments: [], deleted: true });
   }
   fail(op: string, code: string, status: number, times = 1): void {
     for (let i = 0; i < times; i++) this.faults.push({ op, error: { code, status } });
