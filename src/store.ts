@@ -97,6 +97,8 @@ export interface JobView {
   counts: { read: number; records: number; failures: number; skipped: number };
   lastError: string | null;
   retryAt: string | null;
+  /** Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume) */
+  held: boolean;
   /** a sentence for the owner that is not an error (a restarted live job names the span it may have missed) */
   note: string | null;
 }
@@ -113,6 +115,7 @@ export function jobView(r: Row): JobView {
     counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures), skipped: Number(r.skipped_count ?? 0) },
     lastError: r.last_error === null || r.last_error === undefined ? null : str(r.last_error).slice(0, 280),
     retryAt: iso(r.retry_at),
+    held: str(r.state) === "waiting" && r.error_code === "connect_held",
     note: r.note === null || r.note === undefined ? null : str(r.note).slice(0, 400),
   };
 }
@@ -126,7 +129,8 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
 /**
  * The job state machine (obs_jobs.state). Only the owner uses start / resume / cancel; an agent can only pause.
  *   start   : paused, never paused by anyone (paused_by NULL: the state a new live job is created in) → queued
- *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time). After
+ *   resume  : paused (paused_by set), failed, or waiting on a read Connect holds → queued (clears the failure count, error
+ *             and retry time). After
  *             `cursor_invalid` a HISTORY job reads again from Connect's start in its direction (messages already stored fall on
  *             the UNIQUE key); a LIVE job never does that (it would import what came before the source): the handler captures
  *             a fresh anchor first and passes it as `reanchor`, the job continues from it and its note names the span it may
@@ -154,7 +158,9 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       break;
     case "resume":
       if (state === "paused" && r.paused_by !== null) next = "queued";
-      else if (state === "failed") {
+      // a read Connect holds waits for the owner with NO automatic recheck (data_pull takes no idempotency key, so every
+      // recheck could make a new hold): Try again calls Connect once more
+      else if (state === "failed" || (state === "waiting" && r.error_code === "connect_held")) {
         next = "queued";
         reset = true;
       } else throw bad();

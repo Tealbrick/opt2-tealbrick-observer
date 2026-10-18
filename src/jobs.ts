@@ -17,7 +17,7 @@
 // conversation, provider_msg_id) stops a double, the unchanged cursor stops a gap), and a failure that repeats counts to 5.
 //
 // Waits are not failures: Connect's `retryAfterS` (honoured exactly), the bridge's `rate_limited` and Observer's own call budget
-// (wait + backoff), a read Connect holds for the owner (re-checked every 15 min, never failed by holds alone), the slice pause.
+// (wait + backoff), a read Connect holds for the owner (no automatic recheck: it waits for Try again), the slice pause.
 // Other failures back off exponentially with jitter (15 s base, 15 min cap); 5 consecutive failures → `failed` and the app's
 // attention (`jobs_failed`). Refusals that cannot get better (caller_unverified, not_found, scope_denied, cursor_invalid, a 4xx
 // about the input such as since_invalid) fail the job at once with a plain sentence: no retry storm. An unexpected error of the
@@ -42,8 +42,6 @@ export const BACKFILL_KIND = "obs.backfill";
 export const MAX_FAILURES = 5;
 export const BACKOFF_BASE_MS = 15_000;
 export const BACKOFF_CAP_MS = 15 * 60_000;
-/** a read Connect holds for the owner is looked at again after this long */
-export const HELD_RECHECK_MS = BACKOFF_CAP_MS;
 /** the bridge's rate limit gives no time: wait at least this long */
 export const RATE_LIMIT_MIN_MS = 60_000;
 /** while the slice pauses the app: look again after this long (no pull meanwhile) */
@@ -132,7 +130,13 @@ export function fail(d: TickDeps, job: Row, e: unknown, at: number, origin: "con
   // waits that are not failures: the count does not move
   if (code === "call_budget") return again(Number((e as TbError).details?.retryAfterMs ?? 1000));
   if (code === "rate_limited") return waitWithout(Math.max(RATE_LIMIT_MIN_MS, backoffMs(failures + 1, d.random)), plainError(code));
-  if (code === "connect_held") return waitWithout(HELD_RECHECK_MS, plainError(code));
+  // a held read waits for the OWNER: no retry time, no recheck (a recheck without an idempotency key could make a new hold);
+  // Try again (job_control resume) calls once more. Not a failure: the count does not move.
+  if (code === "connect_held") {
+    setState(d, job, "state = 'waiting', retry_at = NULL, last_error = ?, error_code = ?", [plainError(code), code], at);
+    d.statusChanged?.();
+    return DONE;
+  }
   const next = failures + 1;
   const sentence = (mode: "retry" | "final"): string => (origin === "own" ? ownError(code, mode) : plainError(code, mode));
   if ((origin === "connect" && isPermanent(e)) || next >= MAX_FAILURES) {
@@ -249,6 +253,8 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     const job = jobRow(d.db, jobId);
     // paused, cancelled, failed, done or gone: this run ends here; a resume enqueues a new SDK job (syncSdkJob)
     if (!job || !ACTIVE.has(str(job.state))) return DONE;
+    // waiting for the owner to approve a held read: nothing is called until Try again
+    if (str(job.state) === "waiting" && job.error_code === "connect_held") return DONE;
     if (d.paused()) return again(PAUSE_RECHECK_MS);
     const src = sourceRow(d.db, str(job.source_id));
     if (!src) return DONE;
@@ -376,7 +382,7 @@ export function jobsAttention(db: Db): { code: string; reason: string } | null {
   if (n > 0) return { code: "jobs_failed", reason: `${n} Observer job${n === 1 ? "" : "s"} stopped after repeated failures. Open Sources to see why and try again.` };
   // a read Connect holds for the owner waits for a decision: one line, no text of the read
   const held = Number(db.prepare("SELECT COUNT(*) AS c FROM obs_jobs WHERE state = 'waiting' AND error_code = 'connect_held'").get()?.c ?? 0);
-  if (held > 0) return { code: "jobs_held", reason: `${held} Observer read${held === 1 ? " waits" : "s wait"} for your approval in Holds.` };
+  if (held > 0) return { code: "jobs_held", reason: `${held} Observer read${held === 1 ? " waits" : "s wait"} for your approval in Holds. Then press Try again on Sources.` };
   return null;
 }
 

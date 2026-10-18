@@ -790,7 +790,8 @@
                 "counts",
                 "lastError",
                 "retryAt",
-                "note"
+                "note",
+                "held"
               ],
               "properties": {
                 "id": {
@@ -855,6 +856,10 @@
                     }
                   ],
                   "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
                 }
               }
             }
@@ -1429,7 +1434,8 @@
                 "counts",
                 "lastError",
                 "retryAt",
-                "note"
+                "note",
+                "held"
               ],
               "properties": {
                 "id": {
@@ -1494,6 +1500,10 @@
                     }
                   ],
                   "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
                 }
               }
             }
@@ -1544,7 +1554,8 @@
               "counts",
               "lastError",
               "retryAt",
-              "note"
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1609,6 +1620,10 @@
                   }
                 ],
                 "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }
@@ -1668,7 +1683,8 @@
               "counts",
               "lastError",
               "retryAt",
-              "note"
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1733,6 +1749,10 @@
                   }
                 ],
                 "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }
@@ -1876,7 +1896,8 @@
               "counts",
               "lastError",
               "retryAt",
-              "note"
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1941,6 +1962,10 @@
                   }
                 ],
                 "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }

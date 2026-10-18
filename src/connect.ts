@@ -248,7 +248,7 @@ const PLAIN: Record<string, string> = {
   until_invalid: "Connect did not accept the end time of this read. Stop it and start a new one.",
   connect_unavailable: "Observer cannot reach Connect now (the workspace does not let it call Connect).",
   connect_contract: "Connect answered a page Observer cannot use.",
-  connect_held: "Connect holds this read for your approval.",
+  connect_held: "Connect holds this read for your approval. Approve it in Holds, then press Try again.",
   rate_limited: "Connect is busy. Observer waits and tries again by itself.",
   call_budget: CALL_BUDGET_MESSAGE,
 };
