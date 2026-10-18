@@ -36,7 +36,11 @@ describe("Connect-dependent ops without Connect (R3 missing)", () => {
     assert.equal(CONNECT_UNAVAILABLE_MESSAGE, MSG);
   });
   it("sources_available answers an empty list with connectMissing instead of failing", async () => {
-    assert.deepEqual(await run("sources_available", {}, O()), { accounts: [], connectMissing: true });
+    assert.deepEqual(await run("sources_available", {}, O()), { accounts: [], connectMissing: true, targets: [] });
+  });
+  it("targets are the known apps the slice lets Observer call, in a fixed order (the owner UI greys the rest)", async () => {
+    const out = await run("sources_available", {}, O({ targets: ["inbox", "something-else", "knowledge", "connect"] }));
+    assert.deepEqual(out.targets, ["connect", "knowledge", "inbox"]);
   });
   it("source_add, backfill_estimate and backfill_start answer connect_unavailable (409) and change nothing", async () => {
     const src = seedSource(db);
@@ -56,7 +60,7 @@ describe("Connect-dependent ops without Connect (R3 missing)", () => {
   });
   it("a slice that names Connect is not enough while the manifest has no Connect companion (both gates must hold)", async () => {
     const ctx = O({ targets: ["connect", "knowledge"] });
-    assert.deepEqual(await run("sources_available", {}, ctx), { accounts: [], connectMissing: true });
+    assert.deepEqual(await run("sources_available", {}, ctx), { accounts: [], connectMissing: true, targets: ["connect", "knowledge"] });
     await rejects(run("source_add", { account: "a", conversations: ["c"], label: "x" }, ctx), "connect_unavailable", 409);
   });
 });

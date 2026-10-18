@@ -29,6 +29,13 @@ beforeEach(async () => {
   await start(db);
 });
 
+describe("rules_list targets", () => {
+  it("lists the apps the slice reaches (none when the SDK cannot say), so the UI can grey a destination", async () => {
+    assert.deepEqual((await run("rules_list", {}, O())).targets, []);
+    assert.deepEqual((await run("rules_list", {}, ctxFor(db, OWNER, { targets: ["kanban", "knowledge", "unknown"] }))).targets, ["knowledge", "kanban"]);
+  });
+});
+
 describe("rule 0", () => {
   it("onStart creates it: first, locked, drops secrets; starting again changes nothing", async () => {
     const before = (await run("rules_list", {}, O())).rules;

@@ -35,6 +35,8 @@ export interface FakeCaller {
   type: "agent" | "app" | "person";
   id: string;
   name: string;
+  /** the VERIFIED product of an app caller (SDK 0.1.27); absent = an app the slice does not name */
+  product?: string;
 }
 export const AGENT_A: FakeCaller = { type: "agent", id: "agt_01J0000000000000000000000A", name: "Scout" };
 export const AGENT_B: FakeCaller = { type: "agent", id: "agt_01J0000000000000000000000B", name: "Clerk" };

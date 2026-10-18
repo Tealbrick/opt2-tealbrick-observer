@@ -3,6 +3,7 @@
 // marker that ingest left where it removed one (ingest.ts), so a record whose secret was already cut out is still a secret record.
 import { isActionable } from "./actionable.ts";
 import { type DetectConfig, detectAll, mergeSpans } from "./detect/index.ts";
+import { normalize } from "./detect/normalize.ts";
 import { LABELS } from "./detect/redact.ts";
 import { detectSecrets } from "./detect/secret.ts";
 import { detectSuspect } from "./detect/suspect.ts";
@@ -73,7 +74,9 @@ export function classifyRecord(texts: readonly (string | null)[], cfg: ClassifyC
 
 /**
  * Thread subjects and author handles are text too (they are stored, shown and delivered): look at them with both fail-safe detectors
- * (secrets, suspect tokens). A hit there counts like one in the body.
+ * (secrets, suspect tokens). A hit there counts like one in the body, so they are looked at the way the body is: on a NORMALISED copy (NFKC and
+ * format characters dropped, as `detectAll` does; and with look-alike letters folded, as the secret detector does), so a full-width, zero-width
+ * or mixed-script subject or handle cannot hide a token.
  */
 export function classifyMeta(values: readonly (string | null)[]): { secret: number; suspect: number } {
   let secret = 0;
@@ -81,7 +84,7 @@ export function classifyMeta(values: readonly (string | null)[]): { secret: numb
   for (const v of new Set(values)) {
     if (v === null || v === "") continue;
     secret += detectSecrets(v).count + (v.includes(SECRET_MARKER) ? 1 : 0);
-    suspect += detectSuspect(v).count;
+    suspect += Math.max(detectSuspect(normalize(v).text).count, detectSuspect(normalize(v, "keyword").text).count);
   }
   return { secret, suspect };
 }
