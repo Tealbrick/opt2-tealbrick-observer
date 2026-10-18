@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { handlers, setClock } from "../src/app.ts";
+import { classifyMeta } from "../src/classify.ts";
+import { applyRouting } from "../src/pipeline.ts";
 import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
-import { seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
+import { ingestRecord, seedDelivery, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 type Out = Record<string, any>;
 const run = async (opId: keyof typeof handlers, input: unknown, ctx: OpContext): Promise<Out> => (await handlers[opId].run(input as never, ctx)) as Out;
@@ -85,5 +87,70 @@ describe("review_decide acknowledged", () => {
     const src = seedSource(db);
     const rec = seedRecord(db, src, { state: "review", secret: true, pii: { secret: 1, suspect_secret: 1 }, withText: true });
     await assert.rejects(decide(rec, { decision: "deliver", acknowledged: true }), (e: { code?: string }) => e.code === "secret_drop_only");
+  });
+});
+
+describe("classifyMeta on a normalised copy (F1)", () => {
+  const fullwidth = (s: string) => [...s].map((c) => (/[!-~]/.test(c) ? String.fromCharCode(c.charCodeAt(0) + 0xfee0) : c)).join("");
+  const zeroWidth = (s: string) => [...s].join("​");
+  const mixed = (s: string) => s.replace(/x/g, "х").replace(/p/g, "р").replace(/o/g, "о").replace(/a/g, "а");
+  const subject = (t: string) => `Re: key ${t}`;
+
+  it("finds the plain token (the baseline), and the same token in full-width, zero-width and mixed-script form", () => {
+    const t = looksLikeKey();
+    assert.ok(classifyMeta([subject(t)]).suspect > 0, "baseline");
+    for (const [name, form] of [["full-width", fullwidth(t)], ["zero-width", zeroWidth(t)], ["mixed script", mixed(t)]] as const) {
+      assert.ok(classifyMeta([subject(form)]).suspect > 0, `${name} subject`);
+      assert.ok(classifyMeta([null, form]).suspect > 0, `${name} author handle`);
+    }
+  });
+  it("does not fire on a plain subject, with or without the odd characters", () => {
+    for (const v of ["Invoice question from M. Horak", fullwidth("Lunch on Friday?"), zeroWidth("Hello there"), "Re: opening hours"]) assert.equal(classifyMeta([v]).suspect, 0, v);
+  });
+  it("a record whose subject hides the token that way is held as a possible secret after routing", () => {
+    const src = seedSource(db);
+    const rec = ingestRecord(db, src, ["hello"], Date.UTC(2026, 9, 17, 11, 0, 0), { thread: `Re: key ${fullwidth(looksLikeKey())}` });
+    applyRouting(db, rec, Date.UTC(2026, 9, 17, 11, 5, 0));
+    const row = db.prepare("SELECT pii_json, state FROM obs_records WHERE id = ?").get(rec);
+    assert.ok(Number(JSON.parse(String(row?.pii_json)).suspect_secret) > 0);
+    assert.equal(row?.state, "review");
+  });
+});
+
+describe("a record that is not routed yet shows no subject or author (F2)", () => {
+  it("records_list and record_get right after storeMessage, BEFORE applyRouting, carry neither", async () => {
+    const token = looksLikeKey();
+    const src = seedSource(db);
+    const rec = ingestRecord(db, src, ["see you"], Date.UTC(2026, 9, 17, 11, 0, 0), { thread: `Re: key ${token}`, author: `slack:${token}` });
+    const state = String(db.prepare("SELECT state FROM obs_records WHERE id = ?").get(rec)?.state);
+    assert.ok(!["review", "approved", "delivered", "dropped"].includes(state), `not routed yet (${state})`);
+    for (const a of [await run("records_list", {}, O()), await run("record_get", { id: rec }, O())]) assert.ok(!JSON.stringify(a).includes(token), "the token is not in the answer");
+    const detail = (await run("record_get", { id: rec }, O())).record;
+    assert.deepEqual([detail.thread, detail.messages[0].thread, detail.messages[0].author], [null, null, ""]);
+    // once routed (a plain record) the subject shows again (the ingest helper puts every record in thread "t1")
+    const plain = ingestRecord(db, src, ["hello"], Date.UTC(2026, 9, 17, 12, 0, 0));
+    applyRouting(db, plain, Date.UTC(2026, 9, 17, 12, 5, 0));
+    assert.equal((await run("record_get", { id: plain }, O())).record.thread, "t1");
+  });
+});
+
+describe("review_decide revision (F4)", () => {
+  it("a decision on an older revision answers 409 revision_changed and changes nothing; the current revision, or none, is accepted", async () => {
+    const src = seedSource(db);
+    const rec = seedRecord(db, src, { state: "review", pii: { email: 1 }, withText: true, revision: 1 });
+    const read = (await run("review_get", { id: rec }, O())).record.revision;
+    assert.equal(read, 1);
+    // an edit lands between the read and the decision
+    db.prepare("UPDATE obs_records SET revision = 2 WHERE id = ?").run(rec);
+    await assert.rejects(run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge", revision: read }, O()), (e: { code?: string; httpStatus?: number }) => e.code === "revision_changed" && e.httpStatus === 409);
+    assert.equal(db.prepare("SELECT state FROM obs_records WHERE id = ?").get(rec)?.state, "review");
+    assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
+    await run("review_decide", { recordId: rec, decision: "deliver", destination: "knowledge", revision: 2 }, O());
+    assert.equal(db.prepare("SELECT state FROM obs_records WHERE id = ?").get(rec)?.state, "approved");
+  });
+  it("drop is refused on a stale revision too", async () => {
+    const src = seedSource(db);
+    const rec = seedRecord(db, src, { state: "review", revision: 3 });
+    await assert.rejects(run("review_decide", { recordId: rec, decision: "drop", revision: 2 }, O()), (e: { code?: string }) => e.code === "revision_changed");
   });
 });

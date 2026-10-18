@@ -2225,6 +2225,11 @@
           "acknowledged": {
             "type": "boolean",
             "description": "Required (true) to deliver a record held as a possible secret as it is (decision deliver). Deliver redacted needs no acknowledgement."
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The revision of the record the owner read. A newer revision answers 409 revision_changed and nothing is decided."
           }
         }
       },
