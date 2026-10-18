@@ -84,6 +84,9 @@ const FAKE: ConnectPort = {
       { id: "acc_tg_1", kind: "telegram", label: "bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "grp1", title: "Team", estimate: null }] },
     ];
   },
+  async account(id) {
+    return (await FAKE.accounts()).find((a) => a.id === id) as Awaited<ReturnType<ConnectPort["account"]>> ?? null;
+  },
   async estimate(q) {
     return { messages: q.conversations.length * 100, records: q.conversations.length * 10, durationS: 60, providerNote: null };
   },
@@ -145,15 +148,15 @@ describe("with a Connect port (the S2 path)", () => {
     await rejects(run("backfill_start", { source: src, since: "2026-01-01T00:00:00Z" }, O()), "backfill_active", 409);
     const other = seedSource(db);
     await rejects(run("backfill_start", { source: other, since: "2026-01-01T00:00:00Z", until: "2026-01-01T00:00:00Z" }, O()), "range_invalid", 400);
-    await rejects(run("backfill_start", { source: other, since: "2026-10-18T00:00:00Z" }, O()), "range_invalid", 400);
+    await rejects(run("backfill_start", { source: other, since: "2026-10-18T00:00:00Z" }, O()), "since_in_future", 400);
     assert.equal(count(db, "obs_jobs"), 1);
   });
-  it("a source without history (Telegram, Connect 0.6.0) still reads what Connect kept: the job ends at the anchor time", async () => {
+  it("a source without history (Telegram, Connect 0.6.0) still reads what Connect kept: the job ends 5 minutes after the anchor time", async () => {
     const tg = seedSource(db, { kind: "telegram", historyCapable: false, account: "acc_tg_1", conversations: ["grp1"] });
     const out = await run("backfill_start", { source: tg, since: "2026-10-01T00:00:00Z", until: "2026-12-01T00:00:00Z" }, O());
     assert.deepEqual(
       { ...db.prepare("SELECT kind, state, cursor, anchor, anchor_at, since_at, until_at FROM obs_jobs WHERE id = ?").get(out.job.id) },
-      { kind: "backfill", state: "queued", cursor: null, anchor: "anchor_1", anchor_at: now, since_at: Date.UTC(2026, 9, 1), until_at: now },
+      { kind: "backfill", state: "queued", cursor: null, anchor: "anchor_1", anchor_at: now, since_at: Date.UTC(2026, 9, 1), until_at: now + 5 * 60_000 },
     );
   });
 });

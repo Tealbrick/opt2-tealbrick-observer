@@ -9,12 +9,20 @@
 // frozen messages/1 schema (src/contract.ts) and a row that does not conform is skipped and counted, never stored.
 import type { AppDefinition, CompanionTargetsView, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { type CallBudget, type Lane, sharedBudget } from "./budget.ts";
+import { now as clockNow } from "./clock.ts";
 import { MESSAGES_CONTRACT, MESSAGES_DATASET, type Page, readPage } from "./contract.ts";
 import { CONNECT_PRODUCT, connectCompanionProblems } from "./guards.ts";
 import { manifest } from "./manifest.ts";
 
 export const CONNECT_UNAVAILABLE_MESSAGE = "Observer needs Connect with shared read access (data_pull). Connect does not offer it yet.";
 
+/** An account Connect shares with Observer for reading, as data_accounts_list names it (no catalog call). */
+export interface SharedAccount {
+  id: string;
+  kind: string;
+  label: string;
+}
 export interface ConnectConversation {
   id: string;
   title: string;
@@ -49,10 +57,14 @@ export interface PullQuery {
   until?: number | null;
   /** 1..200 */
   limit?: number;
+  /** which share of the call budget the pull uses (default live) */
+  lane?: Lane;
 }
 export interface ConnectPort {
-  /** accounts shared with Observer for reading (level shared) and their conversations */
-  accounts(): Promise<ConnectAccount[]>;
+  /** accounts shared with Observer for reading (level shared): ONE call, no catalogs */
+  accounts(): Promise<SharedAccount[]>;
+  /** one shared account with its conversations, history flag and kept days (the list + ONE catalog), or null */
+  account(id: string): Promise<ConnectAccount | null>;
   estimate(q: { account: string; conversations: string[]; since: number; until: number | null }): Promise<ConnectEstimate>;
   /** one page of the account's `messages` dataset (all conversations, in Connect's change order) */
   pull(q: PullQuery): Promise<Page>;
@@ -93,6 +105,18 @@ const kindOf = (v: unknown): string => {
 };
 const isoOf = (ms: number): string => new Date(ms).toISOString();
 
+export const CALL_BUDGET_MESSAGE = "Observer is reading a lot from Connect right now. Try again in a minute.";
+type Caller = (op: string, input: Record<string, unknown>, lane?: Lane) => Promise<unknown>;
+
+/** Every Connect call goes through the budget first (also the owner's op handlers: they are app calls for the bridge too). */
+function caller(ctx: ConnectCtx, budget: CallBudget): Caller {
+  return async (op, input, lane = "live") => {
+    const wait = budget.take(lane, clockNow());
+    if (wait > 0) throw new TbError("call_budget", CALL_BUDGET_MESSAGE, 429, { retryAfterMs: wait });
+    return call(ctx, op, input);
+  };
+}
+
 async function call(ctx: ConnectCtx, op: string, input: Record<string, unknown>): Promise<unknown> {
   const r = await ctx.callApp(CONNECT_PRODUCT, op, input as never);
   // Connect's data ops are reads; a held read (an owner policy) is a wait, not an answer
@@ -107,9 +131,9 @@ function messagesDataset(out: unknown): Record<string, unknown> | null {
   return isObj(d) ? d : null;
 }
 
-async function catalog(ctx: ConnectCtx, account: string): Promise<Record<string, unknown> | null> {
+async function catalog(c: Caller, account: string): Promise<Record<string, unknown> | null> {
   try {
-    return messagesDataset(await call(ctx, "data_catalog", { account }));
+    return messagesDataset(await c("data_catalog", { account }));
   } catch (e) {
     // the share changed between the list and the catalog: the account is simply not there
     if (e instanceof TbError && (e.code === "not_found" || e.code === "scope_denied")) return null;
@@ -132,24 +156,31 @@ function accountOf(a: Record<string, unknown>, d: Record<string, unknown>): Conn
   };
 }
 
-export function realPort(ctx: ConnectCtx): ConnectPort {
+async function sharedList(c: Caller): Promise<Record<string, unknown>[]> {
+  const out = await c("data_accounts_list", {});
+  const list = isObj(out) && Array.isArray(out.accounts) ? out.accounts : [];
+  return list
+    .filter(
+      (a): a is Record<string, unknown> =>
+        isObj(a) && a.level === "shared" && typeof a.account === "string" && a.account.length >= 1 && a.account.length <= 128 && (!Array.isArray(a.kinds) || a.kinds.includes(MESSAGES_DATASET)),
+    )
+    .slice(0, MAX_ACCOUNTS);
+}
+
+export function realPort(ctx: ConnectCtx, budget: CallBudget = sharedBudget): ConnectPort {
+  const c = caller(ctx, budget);
   return {
     async accounts() {
-      const out = await call(ctx, "data_accounts_list", {});
-      const list = isObj(out) && Array.isArray(out.accounts) ? out.accounts : [];
-      const shared = list.filter(
-        (a): a is Record<string, unknown> =>
-          isObj(a) && a.level === "shared" && typeof a.account === "string" && a.account.length >= 1 && a.account.length <= 128 && (!Array.isArray(a.kinds) || a.kinds.includes(MESSAGES_DATASET)),
-      );
-      const accounts: ConnectAccount[] = [];
-      for (const a of shared.slice(0, MAX_ACCOUNTS)) {
-        const d = await catalog(ctx, String(a.account));
-        if (d) accounts.push(accountOf(a, d));
-      }
-      return accounts;
+      return (await sharedList(c)).map((a) => ({ id: text(a.account, 128), kind: kindOf(a.service), label: text(a.label, 200) || text(a.account, 128) }));
+    },
+    async account(id) {
+      const a = (await sharedList(c)).find((x) => x.account === id);
+      if (!a) return null;
+      const d = await catalog(c, id);
+      return d ? accountOf(a, d) : null;
     },
     async estimate(q) {
-      const d = await catalog(ctx, q.account);
+      const d = await catalog(c, q.account);
       if (!d) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
       const a = accountOf({ account: q.account }, d);
       const messages = a.conversations.filter((c) => q.conversations.includes(c.id)).reduce((n, c) => n + (c.estimate ?? 0), 0);
@@ -167,7 +198,7 @@ export function realPort(ctx: ConnectCtx): ConnectPort {
       if (q.cursor !== null) input.cursor = q.cursor;
       if (q.since !== undefined && q.since !== null) input.since = isoOf(q.since);
       if (q.until !== undefined && q.until !== null) input.until = isoOf(q.until);
-      return readPage(await call(ctx, "data_pull", input));
+      return readPage(await c("data_pull", input, q.lane ?? "live"));
     },
   };
 }
@@ -193,7 +224,18 @@ export function requireConnect(ctx: ConnectCtx): ConnectPort {
 
 // ───────────────────────────────────────────────────────────────────────── Connect's refusals, in plain words
 /** Refusals that do not get better by trying again: the job fails at once (no retry storm). */
-export const PERMANENT_CODES: ReadonlySet<string> = new Set(["caller_unverified", "not_found", "scope_denied", "no_access", "cursor_invalid", "account_not_shared"]);
+export const PERMANENT_CODES: ReadonlySet<string> = new Set(["caller_unverified", "not_found", "scope_denied", "no_access", "cursor_invalid", "account_not_shared", "since_invalid", "until_invalid"]);
+/** 4xx answers that are waits, not wrong input: everything else in 400..499 is permanent too. */
+const WAIT_STATUSES: ReadonlySet<number> = new Set([408, 409, 425, 429]);
+const WAIT_CODES: ReadonlySet<string> = new Set(["paused", "rate_limited", "call_budget", "connect_held", "connect_unavailable"]);
+
+/** True when trying again cannot help: a known refusal, or a 4xx answer about the input (since_invalid, until_invalid, …). */
+export function isPermanent(e: unknown): boolean {
+  if (!(e instanceof TbError)) return false;
+  if (PERMANENT_CODES.has(e.code)) return true;
+  if (WAIT_CODES.has(e.code)) return false;
+  return e.httpStatus >= 400 && e.httpStatus < 500 && !WAIT_STATUSES.has(e.httpStatus);
+}
 
 const PLAIN: Record<string, string> = {
   caller_unverified: "Connect could not verify that the caller is Observer, so it shared nothing. Ask the workspace owner to update Observer and Connect.",
@@ -201,21 +243,55 @@ const PLAIN: Record<string, string> = {
   account_not_shared: "Connect does not share this account with Observer any more. Share it again in Connect, then press Try again.",
   scope_denied: "Connect shares this account for its list only. Share it for reading in Connect, then press Try again.",
   no_access: "Connect refused Observer as a caller of its data operations.",
-  cursor_invalid: "Connect did not accept the saved reading position. Press Try again to read again from the start of what Connect keeps (nothing is stored twice).",
+  cursor_invalid: "Connect did not accept the saved reading position. Press Try again: a history read starts again from what Connect keeps, live reading starts again from now.",
+  since_invalid: "Connect did not accept the start time of this read. Stop it and start a new one.",
+  until_invalid: "Connect did not accept the end time of this read. Stop it and start a new one.",
   connect_unavailable: "Observer cannot reach Connect now (the workspace does not let it call Connect).",
   connect_contract: "Connect answered a page Observer cannot use.",
-  connect_held: "Connect holds this read for an owner decision.",
+  connect_held: "Connect holds this read for your approval.",
+  rate_limited: "Connect is busy. Observer waits and tries again by itself.",
+  call_budget: CALL_BUDGET_MESSAGE,
 };
 /** The sentence the owner reads for a failure (never the provider's own message: it can carry untrusted text). */
 export function plainError(code: string): string {
   return PLAIN[code] ?? `Reading from Connect failed (${code.slice(0, 60)}). Observer tries again by itself.`;
 }
 
-/** The refusal an op handler answers when Connect refuses the anchor read (source_add, backfill_start). */
-export function connectRefusal(e: unknown): unknown {
-  if (!(e instanceof TbError)) return e;
-  if (e.code === "not_found") return new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
-  if (e.code === "scope_denied") return new TbError("account_list_only", PLAIN.scope_denied as string, 403);
-  if (e.code === "caller_unverified" || e.code === "no_access") return new TbError(e.code, PLAIN[e.code] as string, 403);
-  return e;
+const OP_REFUSAL: Record<string, { code: string; status: number }> = {
+  not_found: { code: "account_not_shared", status: 404 },
+  account_not_shared: { code: "account_not_shared", status: 404 },
+  scope_denied: { code: "account_list_only", status: 403 },
+  caller_unverified: { code: "caller_unverified", status: 403 },
+  no_access: { code: "no_access", status: 403 },
+  connect_held: { code: "connect_held", status: 409 },
+  connect_unavailable: { code: "connect_unavailable", status: 409 },
+  call_budget: { code: "call_budget", status: 429 },
+  rate_limited: { code: "connect_busy", status: 429 },
+};
+const OP_SENTENCE: Record<string, string> = {
+  account_not_shared: "this account is not shared with Observer in Connect",
+  account_list_only: PLAIN.scope_denied as string,
+  caller_unverified: PLAIN.caller_unverified as string,
+  no_access: PLAIN.no_access as string,
+  connect_held: "Connect holds this read for your approval. Try again after you decide it.",
+  connect_unavailable: CONNECT_UNAVAILABLE_MESSAGE,
+  call_budget: CALL_BUDGET_MESSAGE,
+  connect_busy: "Connect is busy. Try again in a minute.",
+  connect_failed: "Observer could not read from Connect. Try again later.",
+};
+
+/** What an op handler answers when a Connect call fails: a fixed code and a fixed sentence, never Connect's own message. */
+export function connectRefusal(e: unknown): TbError {
+  const known = e instanceof TbError ? OP_REFUSAL[e.code] : undefined;
+  const code = known?.code ?? "connect_failed";
+  return new TbError(code, OP_SENTENCE[code] as string, known?.status ?? 502);
+}
+
+/** Run an op handler's Connect calls; any failure becomes connectRefusal. */
+export async function viaConnect<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    throw connectRefusal(e);
+  }
 }

@@ -89,7 +89,9 @@ describe("answers match the manifest schemas", () => {
     fake.post("acc1", { conversation: "inbox", id: "m1", text: "hello", sentAt: Date.UTC(2026, 9, 17, 11) });
     const ctx = ctxFor(db, OWNER, { targets: ["connect", "knowledge"], callApp: fake.callApp, jobs: new FakeJobs() });
     const avail = await call("sources_available", {}, ctx);
-    assert.deepEqual(avail.accounts, [{ id: "acc1", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "inbox", title: "Inbox", estimate: 1 }] }]);
+    assert.deepEqual(avail.accounts, [{ id: "acc1", kind: "telegram", label: "Front desk bot" }], "the list: one call, no catalog");
+    const picked = await call("sources_available", { account: "acc1" }, ctx);
+    assert.deepEqual(picked.accounts, [{ id: "acc1", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "inbox", title: "Inbox", estimate: 1 }] }]);
     const added = await call("source_add", { account: "acc1", conversations: ["inbox"], label: "Mail" }, ctx);
     const est = await call("backfill_estimate", { source: added.source.id, since: "2026-01-01T00:00:00Z" }, ctx);
     assert.deepEqual(est, { messages: 1, records: 1, durationS: 1, providerNote: "This source has no older history: Observer reads what Connect kept (up to 30 days)." });

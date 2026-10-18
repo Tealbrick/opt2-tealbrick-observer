@@ -8,3 +8,9 @@ ALTER TABLE obs_jobs ADD COLUMN anchor_at INTEGER;
 ALTER TABLE obs_jobs ADD COLUMN last_read_at INTEGER;
 ALTER TABLE obs_jobs ADD COLUMN skipped_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE obs_jobs ADD COLUMN error_code TEXT;
+-- note          a sentence for the owner about the job that is not an error (a live job that restarted from a fresh anchor
+--               after `cursor_invalid` says which time span may be missing)
+ALTER TABLE obs_jobs ADD COLUMN note TEXT;
+-- kept_days     how many days Connect keeps this account's messages (data_catalog retentionDays, read at source_add); with
+--               history_capable it is what the source card says about history
+ALTER TABLE obs_sources ADD COLUMN kept_days INTEGER;

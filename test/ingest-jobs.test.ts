@@ -4,10 +4,27 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 import type { Db, JobContext, OpContext } from "@opt2-tealbrick/miniapp-sdk";
-import { definition, handlers, setClock } from "../src/app.ts";
+import { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import { BACKFILL_UNTIL_MARGIN_MS, definition, handlers, setClock } from "../src/app.ts";
 import { plainError, realPort, setConnectFactory } from "../src/connect.ts";
 import { CUT_MARKER } from "../src/ingest.ts";
-import { BACKFILL_KIND, BACKOFF_CAP_MS, backoffMs, CallBudget, jobSpec, jobsAttention, LIVE_KIND, PAUSE_RECHECK_MS, reconcileJobs, runTick, type TickDeps } from "../src/jobs.ts";
+import {
+  BACKFILL_KIND,
+  BACKOFF_CAP_MS,
+  backoffMs,
+  CallBudget,
+  HELD_RECHECK_MS,
+  jobSpec,
+  jobsAttention,
+  LIVE_KIND,
+  PAUSE_RECHECK_MS,
+  RATE_LIMIT_MIN_MS,
+  reconcileJobs,
+  runGuarded,
+  runTick,
+  TICK_BUDGET_MS,
+  type TickDeps,
+} from "../src/jobs.ts";
 import { jobRow } from "../src/store.ts";
 import { FakeConnect } from "./fake-connect.ts";
 import { ctxFor, FakeJobs, migratedDb, OWNER, start } from "./helpers.ts";
@@ -32,10 +49,9 @@ function deps(over: Partial<TickDeps> & { db?: Db } = {}): TickDeps {
   const d = over.db ?? db;
   return {
     db: d,
-    port: realPort({ callApp: fake.callApp as never }),
+    port: realPort({ callApp: fake.callApp as never }, budget),
     checkpoint: (_state, write) => d.transaction(() => write(d)),
     paused: () => false,
-    budget,
     random: () => 0.5,
     ...over,
   };
@@ -75,7 +91,7 @@ const ids = (source: string): string[] =>
     .all(source)
     .map((r) => String(r.id));
 
-beforeEach(async () => {
+async function fresh(): Promise<void> {
   db = migratedDb();
   now = T0;
   setClock(() => now);
@@ -85,7 +101,8 @@ beforeEach(async () => {
   fake.addAccount({ id: "acc1", service: "slack", history: false, retentionDays: 30 });
   sdk = new FakeJobs();
   budget = new CallBudget();
-});
+}
+beforeEach(fresh);
 
 describe("anchor first (source_add, backfill_start)", () => {
   it("source_add captures Connect's head BEFORE the job exists; the live job reads only what came after it, also when started later", async () => {
@@ -114,7 +131,12 @@ describe("anchor first (source_add, backfill_start)", () => {
     now += 10 * MIN;
     const out = await run("backfill_start", { source, since: new Date(T0 - 24 * 60 * MIN).toISOString(), until: new Date(T0 + 60 * MIN).toISOString() }, owner());
     const job = one("SELECT state, cursor, since_at, until_at, anchor_at, sdk_job_id FROM obs_jobs WHERE id = ?", out.job.id);
-    assert.deepEqual(job, { state: "queued", cursor: null, since_at: T0 - 24 * 60 * MIN, until_at: T0 + 10 * MIN, anchor_at: T0 + 10 * MIN, sdk_job_id: "sdkjob1" }, "until is never later than the anchor time");
+    assert.deepEqual(
+      job,
+      { state: "queued", cursor: null, since_at: T0 - 24 * 60 * MIN, until_at: T0 + 10 * MIN + BACKFILL_UNTIL_MARGIN_MS, anchor_at: T0 + 10 * MIN, sdk_job_id: "sdkjob1" },
+      "until is the anchor time plus the 5 minute margin (never the owner's later end)",
+    );
+    assert.equal(BACKFILL_UNTIL_MARGIN_MS, 5 * MIN);
     assert.deepEqual(fake.calls.filter((c) => c.op === "data_pull").at(-1)?.input, { account: "acc1", dataset: "messages", direction: "forward", limit: 1 });
     assert.deepEqual(sdk.log, [`enqueue ${BACKFILL_KIND} {"job":"${out.job.id}"}`]);
   });
@@ -198,28 +220,31 @@ describe("edits, deletions, windows and routing", () => {
     assert.ok(!dump().includes(secret.slice(4, 24)), "the secret never reached a table");
     assert.equal(ids(source).length, 2);
   });
-  it("an edit row (same id, later rev, newer editedAt) replaces the text and re-classifies; a deletion row removes the text", async () => {
-    const { live } = await addSource();
-    await startLive(live);
-    post("m1", "see you tomorrow", T0 + 1000);
-    await runTick(live, deps());
-    now += 31 * MIN;
-    await runTick(live, deps());
-    const rec = String(one("SELECT record_id FROM obs_messages WHERE provider_msg_id = 'm1'").record_id);
-    db.prepare("UPDATE obs_records SET state = 'delivered' WHERE id = ?").run(rec);
-    const before = one("SELECT revision, pii_json FROM obs_records WHERE id = ?", rec);
-    fake.edit("acc1", "C1", "m1", "see you tomorrow, write to anna.k@example.com", now);
-    now += MIN;
-    await runTick(live, deps());
-    assert.equal(one("SELECT text FROM obs_messages WHERE provider_msg_id = 'm1'").text, "see you tomorrow, write to anna.k@example.com");
-    const after = one("SELECT state, revision, pii_json FROM obs_records WHERE id = ?", rec);
-    assert.deepEqual([after.state, after.revision, JSON.parse(String(after.pii_json)).email], ["review", Number(before.revision) + 1, 1], "a delivered record that now holds an email goes back to Review");
-    fake.remove("acc1", "C1", "m1", now);
-    now += MIN;
-    await runTick(live, deps());
-    assert.deepEqual(one("SELECT text, deleted FROM obs_messages WHERE provider_msg_id = 'm1'"), { text: null, deleted: 1 });
-    assert.equal(count("SELECT COUNT(*) AS c FROM obs_messages"), 1);
-  });
+  for (const mode of ["inplace", "append"] as const) {
+    it(`an edit (later rev, newer editedAt) replaces the text and re-classifies; a deletion removes the text (Connect model: ${mode})`, async () => {
+      fake.changes = mode;
+      const { live } = await addSource();
+      await startLive(live);
+      post("m1", "see you tomorrow", T0 + 1000);
+      await runTick(live, deps());
+      now += 31 * MIN;
+      await runTick(live, deps());
+      const rec = String(one("SELECT record_id FROM obs_messages WHERE provider_msg_id = 'm1'").record_id);
+      db.prepare("UPDATE obs_records SET state = 'delivered' WHERE id = ?").run(rec);
+      const before = one("SELECT revision, pii_json FROM obs_records WHERE id = ?", rec);
+      fake.edit("acc1", "C1", "m1", "see you tomorrow, write to anna.k@example.com", now);
+      now += MIN;
+      await runTick(live, deps());
+      assert.equal(one("SELECT text FROM obs_messages WHERE provider_msg_id = 'm1'").text, "see you tomorrow, write to anna.k@example.com");
+      const after = one("SELECT state, revision, pii_json FROM obs_records WHERE id = ?", rec);
+      assert.deepEqual([after.state, after.revision, JSON.parse(String(after.pii_json)).email], ["review", Number(before.revision) + 1, 1], "a delivered record that now holds an email goes back to Review");
+      fake.remove("acc1", "C1", "m1", now);
+      now += MIN;
+      await runTick(live, deps());
+      assert.deepEqual(one("SELECT text, deleted FROM obs_messages WHERE provider_msg_id = 'm1'"), { text: null, deleted: 1 });
+      assert.equal(count("SELECT COUNT(*) AS c FROM obs_messages"), 1);
+    });
+  }
   it("a truncated row keeps the cut marker; display names and attachment names are never stored", async () => {
     const { live } = await addSource();
     await startLive(live);
@@ -334,11 +359,42 @@ describe("pause, waits and failures", () => {
     assert.equal(fake.pulls(), pulls + 1);
     assert.deepEqual(await runTick(live, deps()), { status: "done" });
     assert.equal(fake.pulls(), pulls + 1, "no second try by itself");
+    now += 7 * 60 * MIN;
+    post("missed", "sent while the job had failed", now - MIN);
     await run("job_control", { id: live, action: "resume" }, owner());
-    assert.deepEqual(one("SELECT state, cursor, error_code, last_error FROM obs_jobs WHERE id = ?", live), { state: "queued", cursor: null, error_code: null, last_error: null });
-    post("m2", "y", now);
+    const resumed = one("SELECT state, cursor, anchor, anchor_at, error_code, last_error, note FROM obs_jobs WHERE id = ?", live);
+    assert.deepEqual([resumed.state, resumed.error_code, resumed.last_error, resumed.anchor_at, resumed.cursor], ["queued", null, null, now, resumed.anchor], "a LIVE job restarts from a fresh anchor");
+    assert.equal(resumed.note, "Observer restarted reading from now. Messages between 2026-10-17 12:00 UTC and 2026-10-17 19:01 UTC may be missing: start a history read to fill them.");
+    assert.equal((await run("job_get", { id: live }, owner())).job.note, resumed.note, "the owner sees it");
+    post("m2", "y", now + 1000);
     await runTick(live, deps());
-    assert.deepEqual(ids(source), ["m1", "m2"]);
+    assert.deepEqual(ids(source), ["m1", "m2"], "from the fresh anchor on; the missed message is named by the note, not read");
+    await run("backfill_start", { source, since: new Date(T0 - 60 * MIN).toISOString() }, owner());
+    assert.equal(one("SELECT note FROM obs_jobs WHERE id = ?", live).note, null, "a history read clears the note");
+  });
+  it("Try again after cursor_invalid on a LIVE job never imports what came before the source (14 days before source_add)", async () => {
+    post("pre", "two weeks before the source existed", T0 - 14 * 24 * 60 * MIN);
+    const { source, live } = await addSource();
+    await startLive(live);
+    await runTick(live, deps());
+    assert.deepEqual(ids(source), [], "quiet on good: the pre-source message is not read live");
+    db.prepare("UPDATE obs_jobs SET cursor = ? WHERE id = ?").run("bm90LWEtY3Vyc29y", live);
+    now += 60_000;
+    await runTick(live, deps());
+    assert.equal(one("SELECT state FROM obs_jobs WHERE id = ?", live).state, "failed");
+    await run("job_control", { id: live, action: "resume" }, owner());
+    await runTick(live, deps());
+    assert.deepEqual(ids(source), [], "the reset does not read from Connect's start");
+    // a HISTORY job keeps its reset: from Connect's start in its direction
+    const hist = (await run("backfill_start", { source, since: new Date(T0 - 20 * 24 * 60 * MIN).toISOString() }, owner())).job.id;
+    db.prepare("UPDATE obs_jobs SET state = 'failed', error_code = 'cursor_invalid', cursor = 'x' WHERE id = ?").run(hist);
+    await run("job_control", { id: hist, action: "resume" }, owner());
+    assert.equal(one("SELECT cursor FROM obs_jobs WHERE id = ?", hist).cursor, null);
+    // and a live reset without Connect is refused, not done from the old cursor
+    const ctxNoConnect = ctxFor(db, OWNER, { jobs: sdk });
+    db.prepare("UPDATE obs_jobs SET state = 'failed', error_code = 'cursor_invalid' WHERE id = ?").run(live);
+    await assert.rejects(run("job_control", { id: live, action: "resume" }, ctxNoConnect), { code: "connect_unavailable" });
+    assert.equal(one("SELECT state FROM obs_jobs WHERE id = ?", live).state, "failed");
   });
   it("caller_unverified or not_found from Connect: the source shows a plain error, after ONE call (no retry storm)", async () => {
     for (const [setup, code] of [
@@ -378,8 +434,10 @@ describe("budget and history limits", () => {
     const full = new CallBudget(1, 0);
     full.take("live", now);
     const pulls = fake.pulls();
-    assert.deepEqual(await runTick(live, deps({ budget: full })), { status: "again", afterMs: 60_000 });
+    const before = one("SELECT * FROM obs_jobs WHERE id = ?", live);
+    assert.deepEqual(await runTick(live, deps({ port: realPort({ callApp: fake.callApp as never }, full) })), { status: "again", afterMs: 60_000 });
     assert.equal(fake.pulls(), pulls);
+    assert.equal(one("SELECT consecutive_failures AS n FROM obs_jobs WHERE id = ?", live).n, before.consecutive_failures, "not a failure");
   });
   it("a history read stops at maxMessages; history true reads backward from the newest row down to since", async () => {
     fake.addAccount({ id: "acc2", service: "gmail", history: true });
@@ -447,5 +505,245 @@ describe("the SDK runner follows obs_jobs", () => {
     assert.equal(one("SELECT text FROM obs_messages WHERE provider_msg_id = 'm1'").text, "via the SDK ctx");
     assert.deepEqual(await jobSpec.run({ nope: true }, ctx), { status: "done" });
     assert.ok(definition.jobs?.[LIVE_KIND] === jobSpec && definition.jobs?.[BACKFILL_KIND] === jobSpec);
+  });
+});
+
+describe("every write of a run is fenced by its lease", () => {
+  const lostLease: TickDeps["checkpoint"] = () => {
+    throw new TbError("job_lease_lost", "this job run lost its lease", 409);
+  };
+  it("a run that lost its lease writes nothing: no message, no cursor, no state, no failure count, no retry time", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    post("m1", "x", T0 + 1000);
+    db.prepare("UPDATE obs_jobs SET state = 'running' WHERE id = ?").run(live);
+    const before = dump();
+    // a good page
+    await assert.rejects(runTick(live, deps({ checkpoint: lostLease })), { code: "job_lease_lost" });
+    // a failing pull, a rate limit, a hold and an unexpected error
+    for (const arm of [() => fake.fail("data_pull", "upstream_unavailable", 503), () => fake.rateLimit(30), () => fake.fail("data_pull", "connect_held", 409), () => fake.fail("data_pull", "rate_limited", 429)]) {
+      arm();
+      await assert.rejects(runGuarded(live, deps({ checkpoint: lostLease })), { code: "job_lease_lost" });
+    }
+    assert.equal(dump(), before, "not one byte changed");
+    // quiet on good: with its lease the same run stores the page
+    fake.faults.length = 0;
+    await runTick(live, deps());
+    assert.equal(count("SELECT COUNT(*) AS c FROM obs_messages"), 1);
+  });
+  it("an aborted run (pause, stop, timeout) writes nothing either", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    fake.fail("data_pull", "upstream_unavailable", 503);
+    db.prepare("UPDATE obs_jobs SET state = 'running' WHERE id = ?").run(live);
+    const ac = new AbortController();
+    const before = one("SELECT * FROM obs_jobs WHERE id = ?", live);
+    const d = deps({ signal: ac.signal });
+    const port = d.port as NonNullable<TickDeps["port"]>;
+    d.port = { ...port, pull: async (q) => {
+      ac.abort();
+      return port.pull(q);
+    } };
+    assert.deepEqual(await runTick(live, d), { status: "again", afterMs: 0 });
+    assert.deepEqual(one("SELECT * FROM obs_jobs WHERE id = ?", live), before);
+  });
+});
+
+describe("guarded ticks, the time budget and the last page", () => {
+  it("an unexpected error of the tick counts as a failure with a plain sentence and waits (5 of them fail the job)", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    const d = deps();
+    const broken = { ...d, port: { ...(d.port as NonNullable<TickDeps["port"]>), pull: async () => { throw new TypeError("internal bug with a secret-ish detail"); } } };
+    // the pull's own catch handles it; a crash outside it (windowing) goes through runGuarded
+    const outcome = await runGuarded(live, broken as TickDeps);
+    assert.equal(outcome.status, "again");
+    const j = one("SELECT state, consecutive_failures, last_error, error_code FROM obs_jobs WHERE id = ?", live);
+    assert.deepEqual([j.state, j.consecutive_failures, j.error_code], ["waiting", 1, "error"]);
+    assert.ok(!String(j.last_error).includes("secret-ish"), "never the error's own text");
+    post("m1", "x", now);
+    now = Number(one("SELECT retry_at FROM obs_jobs WHERE id = ?", live).retry_at);
+    // windowing (inside the page's checkpoint) crashes: nothing of the page is kept, and the failure counts
+    const crashing = deps({ checkpoint: (_s, w) => db.transaction(() => {
+      const had = count("SELECT COUNT(*) AS c FROM obs_records");
+      const out = w(db);
+      if (had === 0 && count("SELECT COUNT(*) AS c FROM obs_records") > 0) throw new RangeError("windowing bug");
+      return out;
+    }) });
+    assert.equal((await runGuarded(live, crashing)).status, "again");
+    assert.equal(one("SELECT consecutive_failures AS n FROM obs_jobs WHERE id = ?", live).n, 2, "counted");
+    assert.equal(count("SELECT COUNT(*) AS c FROM obs_messages"), 0, "the page went back with the failed windowing");
+    for (let i = 3; i <= 5; i++) {
+      now = Number(one("SELECT retry_at FROM obs_jobs WHERE id = ?", live).retry_at ?? now);
+      await runGuarded(live, broken as TickDeps);
+    }
+    assert.deepEqual(one("SELECT state, consecutive_failures FROM obs_jobs WHERE id = ?", live), { state: "failed", consecutive_failures: 5 });
+    assert.deepEqual(await jobSpec.run({ job: "job_01J00000000000000000000000" }, { db } as unknown as JobContext), { status: "done" });
+  });
+  it("a tick stops paging when its time budget is used (far below the SDK's 10 minute tick timeout)", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    for (let i = 1; i <= 6; i++) post(`m${i}`, `x${i}`, T0 + i * 1000);
+    const d = deps({ pageLimit: 1 });
+    const port = d.port as NonNullable<TickDeps["port"]>;
+    d.port = { ...port, pull: async (q) => {
+      now += TICK_BUDGET_MS / 2; // every page takes a minute
+      return port.pull(q);
+    } };
+    assert.deepEqual(await runTick(live, d), { status: "again", afterMs: 0 });
+    assert.equal(fake.pulls() - 1, 2, "two pages, then the tick hands back");
+    assert.ok(TICK_BUDGET_MS <= 10 * 60_000 / 4);
+  });
+  it("the last page of a backward history read writes `done` in the SAME checkpoint as the page", async () => {
+    fake.addAccount({ id: "acc2", service: "gmail", history: true });
+    for (let i = 1; i <= 3; i++) fake.post("acc2", { conversation: "C1", id: `h${i}`, text: `old ${i}`, sentAt: T0 - i * 60 * MIN });
+    const src = (await run("source_add", { account: "acc2", conversations: ["C1"], label: "Mail" }, owner())).source.id;
+    const hist = (await run("backfill_start", { source: src, since: new Date(T0 - 10 * 60 * MIN).toISOString() }, owner())).job.id;
+    const seen: { messages: number; state: string }[] = [];
+    const d = deps({
+      pageLimit: 2,
+      checkpoint: (_s, w) =>
+        db.transaction(() => {
+          const out = w(db);
+          seen.push({ messages: count("SELECT COUNT(*) AS c FROM obs_messages WHERE source_id = ?", src), state: String(one("SELECT state FROM obs_jobs WHERE id = ?", hist).state) });
+          return out;
+        }),
+    });
+    assert.deepEqual(await runTick(hist, d), { status: "done" });
+    const pageCommits = seen.filter((x, i) => i === 0 || x.messages !== seen[i - 1]?.messages);
+    assert.deepEqual(pageCommits.at(-1), { messages: 3, state: "done" }, "the page with the last rows is the commit that says done");
+    assert.ok(seen.some((x) => x.messages === 2 && x.state === "running"), "quiet on good: an earlier page leaves it running");
+  });
+  it("slice pause between page 1 and page 2: page 2 is not pulled", async () => {
+    const { source, live } = await addSource();
+    await startLive(live);
+    for (let i = 1; i <= 4; i++) post(`m${i}`, `x${i}`, T0 + i * 1000);
+    let checks = 0;
+    const pulls = fake.pulls();
+    assert.deepEqual(await runTick(live, deps({ pageLimit: 2, paused: () => ++checks > 1 })), { status: "again", afterMs: PAUSE_RECHECK_MS });
+    assert.equal(fake.pulls(), pulls + 1);
+    assert.deepEqual(ids(source), ["m1", "m2"]);
+  });
+});
+
+describe("waits, permanent input errors and plain refusals", () => {
+  it("the bridge's rate_limited is a wait (at least a minute), not a failure; connect_held waits for the owner and never fails the job", async () => {
+    const { live } = await addSource();
+    await startLive(live);
+    fake.fail("data_pull", "rate_limited", 429);
+    assert.deepEqual(await runTick(live, deps()), { status: "again", afterMs: RATE_LIMIT_MIN_MS });
+    assert.deepEqual(one("SELECT state, consecutive_failures, last_error FROM obs_jobs WHERE id = ?", live), { state: "waiting", consecutive_failures: 0, last_error: plainError("rate_limited") });
+    for (let i = 0; i < 8; i++) {
+      now = Number(one("SELECT retry_at FROM obs_jobs WHERE id = ?", live).retry_at);
+      fake.fail("data_pull", "connect_held", 409);
+      assert.deepEqual(await runTick(live, deps()), { status: "again", afterMs: HELD_RECHECK_MS });
+    }
+    assert.deepEqual(one("SELECT state, consecutive_failures, last_error FROM obs_jobs WHERE id = ?", live), { state: "waiting", consecutive_failures: 0, last_error: "Connect holds this read for your approval." });
+    assert.equal(HELD_RECHECK_MS, BACKOFF_CAP_MS);
+    now = Number(one("SELECT retry_at FROM obs_jobs WHERE id = ?", live).retry_at);
+    post("m1", "x", now);
+    await runTick(live, deps());
+    assert.deepEqual(one("SELECT state, last_error FROM obs_jobs WHERE id = ?", live), { state: "waiting", last_error: null }, "quiet on good: the next page clears it");
+  });
+  it("since_invalid, until_invalid and other 4xx input errors fail at once (no retries)", async () => {
+    for (const code of ["since_invalid", "until_invalid", "limit_invalid"]) {
+      const { live } = await addSource({ label: code });
+      await startLive(live);
+      fake.fail("data_pull", code, 400);
+      const pulls = fake.pulls();
+      assert.deepEqual(await runTick(live, deps()), { status: "done" }, code);
+      assert.deepEqual(one("SELECT state, consecutive_failures, error_code FROM obs_jobs WHERE id = ?", live), { state: "failed", consecutive_failures: 1, error_code: code });
+      await runTick(live, deps());
+      assert.equal(fake.pulls(), pulls + 1, code);
+    }
+    // quiet on good: a 5xx is retried
+    const { live } = await addSource({ label: "5xx" });
+    await startLive(live);
+    fake.fail("data_pull", "upstream_unavailable", 503);
+    assert.equal((await runTick(live, deps())).status, "again");
+  });
+  it("op handlers answer Connect's failures with fixed sentences, never Connect's own message", async () => {
+    for (const [code, status, want] of [
+      ["upstream_unavailable", 503, "connect_failed"],
+      ["connect_held", 409, "connect_held"],
+      ["rate_limited", 429, "connect_busy"],
+      ["scope_denied", 403, "account_list_only"],
+    ] as const) {
+      fake.fail("data_accounts_list", code, status);
+      await assert.rejects(run("sources_available", {}, owner()), (e: { code?: string; message?: string }) => {
+        assert.equal(e.code, want, code);
+        assert.ok(!String(e.message).includes("fake"), `${code}: ${e.message}`);
+        return true;
+      });
+    }
+    fake.fail("data_pull", "since_invalid", 400);
+    await assert.rejects(run("source_add", { account: "acc1", conversations: ["C1"], label: "x" }, owner()), (e: { code?: string; message?: string }) => e.code === "connect_failed" && !String(e.message).includes("fake"));
+  });
+  it("backfill_start: a start in the future has its own code (not the end-date one)", async () => {
+    const { source } = await addSource();
+    await assert.rejects(run("backfill_start", { source, since: new Date(now + MIN).toISOString() }, owner()), { code: "since_in_future", httpStatus: 400 });
+  });
+});
+
+describe("one account, one catalog, one budget", () => {
+  it("source_add and source_update read the list once and the catalog of the ONE account; sources_available alone reads no catalog", async () => {
+    fake.addAccount({ id: "acc2" });
+    fake.addAccount({ id: "acc3" });
+    const ops = () => fake.calls.map((c) => `${c.op}${c.input.account ? `:${c.input.account}` : ""}`);
+    const list = await run("sources_available", {}, owner());
+    assert.deepEqual(list.accounts.map((a: Out) => a.id), ["acc1", "acc2", "acc3"]);
+    assert.deepEqual(ops(), ["data_accounts_list"]);
+    fake.calls.length = 0;
+    const one2 = await run("sources_available", { account: "acc2" }, owner());
+    assert.deepEqual([one2.accounts.length, one2.accounts[0].conversations.length, one2.accounts[0].retentionDays], [1, 2, 30]);
+    assert.deepEqual(ops(), ["data_accounts_list", "data_catalog:acc2"]);
+    fake.calls.length = 0;
+    const { source } = await addSource();
+    assert.deepEqual(ops(), ["data_accounts_list", "data_catalog:acc1", "data_pull:acc1"]);
+    assert.deepEqual([one("SELECT kept_days FROM obs_sources WHERE id = ?", source).kept_days, (await run("source_get", { id: source }, owner())).source.keptDays], [30, 30]);
+    fake.calls.length = 0;
+    await run("source_update", { id: source, conversations: ["C1", "C2"] }, owner());
+    assert.deepEqual(ops(), ["data_accounts_list", "data_catalog:acc1"]);
+  });
+  it("op handler calls count against the same budget as the jobs (a full budget refuses the owner's click with call_budget)", async () => {
+    const shared = new CallBudget(3, 0);
+    setConnectFactory((ctx) => realPort(ctx, shared));
+    await run("sources_available", {}, owner());
+    await run("sources_available", { account: "acc1" }, owner()); // 2 calls: 3 used
+    assert.equal(shared.used, 3);
+    await assert.rejects(run("sources_available", {}, owner()), { code: "call_budget", httpStatus: 429 });
+    assert.equal(fake.calls.length, 3, "the refused click made no call");
+  });
+});
+
+describe("the fake Connect's two change models give the same result", () => {
+  async function scenario(mode: "inplace" | "append"): Promise<unknown> {
+    await fresh();
+    fake.changes = mode;
+    const { live } = await addSource();
+    await startLive(live);
+    post("a", "first", T0 + 1000);
+    post("b", "second", T0 + 2000);
+    await runTick(live, deps());
+    fake.edit("acc1", "C1", "a", "first, edited", T0 + 3000);
+    fake.remove("acc1", "C1", "b", T0 + 4000);
+    post("c", "third", T0 + 5000);
+    fake.edit("acc1", "C1", "c", "third, edited", T0 + 6000);
+    now += 2 * MIN;
+    await runTick(live, deps());
+    return db.prepare("SELECT conversation, provider_msg_id, text, edited_at, deleted, sent_at FROM obs_messages ORDER BY provider_msg_id").all().map((r) => ({ ...r }));
+  }
+  it("in place (Connect's own) and as new rows", async () => {
+    const inplace = await scenario("inplace");
+    const append = await scenario("append");
+    assert.deepEqual(inplace, append);
+    assert.deepEqual(
+      (inplace as Out[]).map((r) => [r.provider_msg_id, r.text, r.deleted]),
+      [
+        ["a", "first, edited", 0],
+        ["b", null, 1],
+        ["c", "third, edited", 0],
+      ],
+    );
   });
 });

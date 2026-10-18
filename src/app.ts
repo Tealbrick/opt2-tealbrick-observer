@@ -48,7 +48,7 @@ import {
   type StatusOutput,
 } from "#kit";
 import { now, setClock } from "./clock.ts";
-import { companionTargets, connectPort, connectRefusal, requireConnect } from "./connect.ts";
+import { companionTargets, connectPort, connectRefusal, requireConnect, viaConnect } from "./connect.ts";
 import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
 import { BACKFILL_KIND, jobSpec, jobsAttention, jobsOf, LIVE_KIND, reconcileJobs, syncSdkJob } from "./jobs.ts";
@@ -136,11 +136,16 @@ function needSource(db: Db, id: string): Record<string, unknown> {
 
 const MAX_SOURCES = 100;
 
+/** A history read ends this long after its anchor time: clocks of Connect, the provider and Observer differ a little, and a
+ *  message can be in flight while the anchor is taken. Reading 5 minutes too far is harmless (UNIQUE per message: the live job
+ *  may have stored it already); reading too little would be a gap. */
+export const BACKFILL_UNTIL_MARGIN_MS = 5 * 60_000;
+
 /** Where Connect's log of the account is now: a no-cursor pull answers `anchor` (absent when the log is empty: then the start is
  *  the anchor). Taken BEFORE the job exists, so the job's start can never be later than this moment (no gap). */
 async function captureAnchor(port: ReturnType<typeof requireConnect>, account: string, direction: "forward" | "backward"): Promise<string | null> {
   try {
-    return (await port.pull({ account, direction, cursor: null, limit: 1 })).anchor;
+    return (await port.pull({ account, direction, cursor: null, limit: 1, lane: "live" })).anchor;
   } catch (e) {
     throw connectRefusal(e);
   }
@@ -215,11 +220,17 @@ export const handlers = {
 
   // ───────────────────────────────────────────── person ops: sources
   [OP.sourcesAvailable]: op<SourcesAvailableInput, unknown>({
-    async run(_i, ctx) {
+    async run(i, ctx) {
       const port = connectPort(ctx);
       const targets = targetsOf(ctx);
       if (!port) return { accounts: [], connectMissing: true, targets };
-      return { accounts: await port.accounts(), connectMissing: false, targets };
+      // the list is ONE call; the conversations of an account (one catalog call) only when the owner picked it
+      const account = (i as { account?: string }).account;
+      if (account !== undefined) {
+        const a = await viaConnect(() => port.account(account));
+        return { accounts: a ? [a] : [], connectMissing: false, targets };
+      }
+      return { accounts: await viaConnect(() => port.accounts()), connectMissing: false, targets };
     },
   }),
   [OP.sourcesList]: op<SourcesListInput, unknown>({
@@ -241,7 +252,7 @@ export const handlers = {
       const conversations = [...new Set(i.conversations)];
       if (conversations.length === 0) throw new TbError("conversations_empty", "choose at least one conversation", 400);
       if (Number(ctx.db.prepare("SELECT COUNT(*) AS c FROM obs_sources").get()?.c ?? 0) >= MAX_SOURCES) throw new TbError("sources_limit", `at most ${MAX_SOURCES} sources`, 409);
-      const account = (await port.accounts()).find((a) => a.id === i.account);
+      const account = await viaConnect(() => port.account(i.account));
       if (!account) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
       const known = new Set(account.conversations.map((c) => c.id));
       const unknown = conversations.find((c) => !known.has(c));
@@ -260,6 +271,7 @@ export const handlers = {
           liveIntervalS: i.liveIntervalS ?? 60,
           retentionDays: i.retentionDays ?? null,
           historyCapable: account.historyCapable,
+          keptDays: account.retentionDays,
           anchor,
           anchorAt,
         },
@@ -281,7 +293,8 @@ export const handlers = {
       // shows the estimate for the wider list through backfill_estimate before a history read.
       const added = conversations.filter((c) => !before.includes(c));
       if (added.length > 0) {
-        const account = (await requireConnect(ctx).accounts()).find((a) => a.id === String(r.account));
+        const port = requireConnect(ctx);
+        const account = await viaConnect(() => port.account(String(r.account)));
         if (!account) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
         const known = new Set(account.conversations.map((c) => c.id));
         const unknown = added.find((c) => !known.has(c));
@@ -350,7 +363,15 @@ export const handlers = {
     async run(i, ctx) {
       const r = jobRow(ctx.db, i.id);
       if (!r) throw notFound("job");
-      const { row, changed } = transitionJob(ctx.db, r, i.action, callerKey(ctx), now());
+      // Try again on a LIVE job whose cursor Connect refused: never from Connect's start (that would import what came before
+      // the source). A fresh anchor first, the job continues from it, and its note says which span may be missing.
+      let reanchor: { anchor: string | null; at: number } | undefined;
+      if (i.action === "resume" && r.state === "failed" && r.kind === "live" && r.error_code === "cursor_invalid") {
+        const src = needSource(ctx.db, String(r.source_id));
+        const anchor = await captureAnchor(requireConnect(ctx), String(src.account), "forward");
+        reanchor = { anchor, at: now() };
+      }
+      const { row, changed } = transitionJob(ctx.db, r, i.action, callerKey(ctx), now(), reanchor);
       if (changed) {
         syncSdkJob(jobsOf(ctx), ctx.db, String(row.id));
         ctx.statusChanged();
@@ -365,7 +386,7 @@ export const handlers = {
       const since = parseDate(i.since, "since");
       const until = i.until !== undefined ? parseDate(i.until, "until") : null;
       if (until !== null && until <= since) throw new TbError("range_invalid", "until must be after since", 400);
-      return port.estimate({ account: String(r.account), conversations: conversationsOf(r), since, until });
+      return viaConnect(() => port.estimate({ account: String(r.account), conversations: conversationsOf(r), since, until }));
     },
   }),
   [OP.backfillStart]: op<BackfillStartInput, unknown>({
@@ -383,12 +404,15 @@ export const handlers = {
       if (since < oldest.getTime()) throw new TbError("since_too_old", `history can reach back at most ${BACKFILL_MAX_YEARS} years`, 400);
       if (until !== null && until <= since) throw new TbError("range_invalid", "until must be after since", 400);
       if (activeBackfill(ctx.db, i.source)) throw new TbError("backfill_active", "this source already has a history job; cancel it first", 409);
-      if (since >= t) throw new TbError("range_invalid", "since must be in the past", 400);
+      if (since >= t) throw new TbError("since_in_future", "since must be in the past", 400);
       // the anchor BEFORE the job exists: the history read ends at this moment (what comes later is the live job's), so there
       // is no gap; an overlap with the live job is harmless (UNIQUE per message)
       const anchor = await captureAnchor(port, String(r.account), history ? "backward" : "forward");
       const anchorAt = now();
-      const job = createBackfill(ctx.db, i.source, { since, until: until === null ? anchorAt : Math.min(until, anchorAt), maxMessages: i.maxMessages ?? BACKFILL_DEFAULT_MAX_MESSAGES, anchor, anchorAt }, anchorAt);
+      const end = anchorAt + BACKFILL_UNTIL_MARGIN_MS;
+      const job = createBackfill(ctx.db, i.source, { since, until: until === null ? end : Math.min(until, end), maxMessages: i.maxMessages ?? BACKFILL_DEFAULT_MAX_MESSAGES, anchor, anchorAt }, anchorAt);
+      // a history read is what the note of a restarted live job asks for: it has been started
+      ctx.db.prepare("UPDATE obs_jobs SET note = NULL WHERE source_id = ? AND kind = 'live'").run(i.source);
       syncSdkJob(jobsOf(ctx), ctx.db, String(job.id));
       ctx.statusChanged();
       return { job: jobView(jobRow(ctx.db, String(job.id)) ?? job) };

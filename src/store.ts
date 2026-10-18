@@ -27,6 +27,8 @@ export type RecordState = (typeof RECORD_STATES)[number];
 export type Destination = "knowledge" | "kanban" | "inbox";
 
 export const iso = (ms: unknown): string | null => (ms === null || ms === undefined ? null : new Date(Number(ms)).toISOString());
+/** "2026-10-17 12:00 UTC" for sentences the owner reads */
+export const humanTime = (ms: number): string => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 const str = (v: unknown): string => String(v);
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -95,6 +97,8 @@ export interface JobView {
   counts: { read: number; records: number; failures: number; skipped: number };
   lastError: string | null;
   retryAt: string | null;
+  /** a sentence for the owner that is not an error (a restarted live job names the span it may have missed) */
+  note: string | null;
 }
 
 export function jobRow(db: Db, id: string): Row | undefined {
@@ -109,6 +113,7 @@ export function jobView(r: Row): JobView {
     counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures), skipped: Number(r.skipped_count ?? 0) },
     lastError: r.last_error === null || r.last_error === undefined ? null : str(r.last_error).slice(0, 280),
     retryAt: iso(r.retry_at),
+    note: r.note === null || r.note === undefined ? null : str(r.note).slice(0, 400),
   };
 }
 export function listJobs(db: Db, source: string | undefined, limit = 200): JobView[] {
@@ -121,9 +126,11 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
 /**
  * The job state machine (obs_jobs.state). Only the owner uses start / resume / cancel; an agent can only pause.
  *   start   : paused, never paused by anyone (paused_by NULL: the state a new live job is created in) → queued
- *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time; after
- *             `cursor_invalid` also the cursor, so the job reads again from the start of what Connect keeps: messages already
- *             stored fall on the UNIQUE key, nothing is stored twice)
+ *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time). After
+ *             `cursor_invalid` a HISTORY job reads again from Connect's start in its direction (messages already stored fall on
+ *             the UNIQUE key); a LIVE job never does that (it would import what came before the source): the handler captures
+ *             a fresh anchor first and passes it as `reanchor`, the job continues from it and its note names the span it may
+ *             have missed. A live job with cursor_invalid cannot resume without a fresh anchor (`reanchor_required`).
  *   pause   : queued | running | waiting → paused, paused_by = the caller; pausing a paused job is a no-op
  *   cancel  : queued | running | waiting | paused | failed → cancelled; cancelling a cancelled job is a no-op
  * `done` and `cancelled` are final. Anything else is `job_state_invalid` (409).
@@ -132,8 +139,10 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
  * transition the handler calls `syncSdkJob`, and each tick reads this state before every pull (a paused or cancelled job never
  * pulls again). The tick moves queued → running → waiting/done/failed.
  */
-export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number): { row: Row; changed: boolean } {
+export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number, reanchor?: { anchor: string | null; at: number }): { row: Row; changed: boolean } {
   const state = str(r.state) as JobState;
+  const liveReset = action === "resume" && state === "failed" && r.kind === "live" && r.error_code === "cursor_invalid";
+  if (liveReset && !reanchor) throw new TbError("reanchor_required", "a live job whose reading position Connect refused restarts from a fresh anchor", 409);
   const bad = () => new TbError("job_state_invalid", `cannot ${action} a job that is ${state}`, 409);
   let next: JobState | null = null;
   let pausedBy: string | null = strOrNull(r.paused_by);
@@ -163,11 +172,19 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       next = "cancelled";
       break;
   }
-  db.prepare(
-    `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${
-      reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' THEN NULL ELSE cursor END, consecutive_failures = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
-    } WHERE id = ?`,
-  ).run(next, pausedBy, now, str(r.id));
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${
+        reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' AND kind = 'backfill' THEN NULL ELSE cursor END, consecutive_failures = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
+      } WHERE id = ?`,
+    ).run(next, pausedBy, now, str(r.id));
+    if (liveReset && reanchor) {
+      // the gap is said honestly: from the last page read (or the old anchor) to the fresh anchor
+      const from = r.last_read_at ?? r.anchor_at;
+      const note = `Observer restarted reading from now. Messages between ${from === null || from === undefined ? "the last read" : humanTime(Number(from))} and ${humanTime(reanchor.at)} may be missing: start a history read to fill them.`;
+      db.prepare("UPDATE obs_jobs SET cursor = ?, anchor = ?, anchor_at = ?, note = ? WHERE id = ?").run(reanchor.anchor, reanchor.anchor, reanchor.at, note, str(r.id));
+    }
+  });
   const row = jobRow(db, str(r.id));
   if (!row) throw notFound("job");
   return { row, changed: true };
@@ -182,6 +199,10 @@ export interface SourceView {
   conversations: string[];
   live: { state: string; lastReadAt: string | null; nextAt: string | null };
   history: { state: string; done: number; total: number | null; since: string | null };
+  /** Connect can page further back than what it kept */
+  historyCapable: boolean;
+  /** days Connect keeps the account's messages (null: it did not say) */
+  keptDays: number | null;
 }
 export interface Exclude {
   senders: string[];
@@ -243,6 +264,8 @@ function sourceParts(db: Db, r: Row): { view: SourceView; liveJobId: string | nu
         total: hist && hist.max_messages !== null ? Number(hist.max_messages) : null,
         since: hist ? iso(hist.since_at) : null,
       },
+      historyCapable: Number(r.history_capable) === 1,
+      keptDays: r.kept_days === null || r.kept_days === undefined ? null : Number(r.kept_days),
     },
     liveJobId: live ? str(live.id) : null,
     historyJobId: hist ? str(hist.id) : null,
@@ -281,6 +304,8 @@ export interface NewSource {
   liveIntervalS: number;
   retentionDays: number | null;
   historyCapable: boolean;
+  /** days Connect keeps the account's messages (data_catalog retentionDays) */
+  keptDays: number | null;
   /** Connect's head position, captured BEFORE the job exists (null: the log was empty); the live job reads forward from it */
   anchor: string | null;
   anchorAt: number;
@@ -292,9 +317,9 @@ export function createSource(db: Db, s: NewSource, now: number): { source: strin
   const job = `job_${ulid(now)}`;
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, now, now);
+      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, kept_days, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, s.keptDays, now, now);
     db.prepare(
       `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, cursor, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?, ?, ?, ?)`,
     ).run(job, source, s.anchor, s.anchor, s.anchorAt, now, now);
