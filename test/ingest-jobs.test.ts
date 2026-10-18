@@ -857,7 +857,7 @@ describe("round 2: own errors, one bad record, held reads", () => {
     await runTick(live, d());
     const states = db.prepare("SELECT m.provider_msg_id AS id, r.state, r.problem, r.pii_json FROM obs_messages m JOIN obs_records r ON r.id = m.record_id ORDER BY m.provider_msg_id").all().map((r) => ({ ...r }));
     assert.deepEqual(states.map((r) => [r.id, r.state, r.problem]), [["good", "review", null], ["poison", "review", "routing_failed"]]);
-    assert.equal(JSON.parse(String(states[1]?.pii_json)).suspect_secret, 1, "held as a possible secret: never delivered automatically");
+    assert.equal(JSON.parse(String(states[1]?.pii_json)).suspect_secret ?? 0, 0, "NOT made a possible secret");
     assert.deepEqual(one("SELECT state, consecutive_failures FROM obs_jobs WHERE id = ?", live), { state: "waiting", consecutive_failures: 0 }, "the job is not stalled");
     const cursor = one("SELECT cursor FROM obs_jobs WHERE id = ?", live).cursor;
     post("later", "after the bad one", now, { thread: "T3" });
@@ -870,6 +870,15 @@ describe("round 2: own errors, one bad record, held reads", () => {
     assert.deepEqual(ids(source), ["good", "later", "poison"], "no message dropped");
     const review = await run("review_list", {}, owner());
     assert.equal(review.items.length, 3, "the bad record is visible to the owner in Review");
+    const bad = review.items.find((r: Out) => r.problem === "routing_failed");
+    assert.deepEqual([bad?.problem, bad?.possibleSecret, bad?.thread], ["routing_failed", false, null], "its own reason, not a possible secret, subject hidden");
+    assert.deepEqual(review.items.filter((r: Out) => r.problem !== null).length, 1, "quiet on good: the others carry no problem");
+    const got = (await run("review_get", { id: bad.id }, owner())).record;
+    assert.deepEqual([got.problem, got.possibleSecret], ["routing_failed", false]);
+    // the safe default: deliver as is only with the owner's acknowledgement
+    await assert.rejects(run("review_decide", { recordId: bad.id, decision: "deliver", destination: "knowledge" }, owner()), { code: "acknowledgement_required" });
+    const ok = (await run("review_decide", { recordId: bad.id, decision: "deliver", destination: "knowledge", acknowledged: true }, owner())).record;
+    assert.equal(ok.state, "approved");
   });
   it("a read Connect holds raises attention in one line (no text); a failed job wins", async () => {
     const { live } = await addSource();

@@ -2275,7 +2275,23 @@
             "type": "array",
             "maxItems": 50,
             "items": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "problem": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "routing_failed"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+                }
+              }
             }
           },
           "nextCursor": {
@@ -2327,7 +2343,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },
@@ -2394,7 +2426,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },
@@ -2444,7 +2492,23 @@
             "type": "array",
             "maxItems": 50,
             "items": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "problem": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "routing_failed"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+                }
+              }
             }
           },
           "nextCursor": {
@@ -2496,7 +2560,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },

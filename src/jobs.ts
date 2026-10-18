@@ -32,7 +32,7 @@ import { toIncoming } from "./contract.ts";
 import { storeMessage } from "./ingest.ts";
 import { applyRouting } from "./pipeline.ts";
 import { attachWindow } from "./records.ts";
-import { jobRow, parsePii, type Row, recordRow, sourceRow } from "./store.ts";
+import { jobRow, type Row, recordRow, sourceRow } from "./store.ts";
 import { backfillWindows, liveWindows, type WindowMessage } from "./window.ts";
 
 export { CALLS_PER_MINUTE, LIVE_RESERVE } from "./budget.ts";
@@ -235,14 +235,10 @@ export function windowSource(db: Db, sourceId: string, kind: "live" | "backfill"
 }
 
 export const RECORD_PROBLEM = "routing_failed";
-/** A record Observer could not route: in Review, held as a possible secret (never delivered automatically, opens redacted),
- *  with a fixed reason. */
+/** A record Observer could not route: in Review with the fixed reason `routing_failed`. Its text opens hidden and it is never
+ *  delivered as it is without the owner's acknowledgement (store.ts hasProblem), but it is NOT called a possible secret. */
 export function holdForOwner(db: Db, recordId: string, at: number): void {
-  const rec = recordRow(db, recordId);
-  if (!rec) return;
-  const pii = parsePii(rec.pii_json);
-  pii.suspect_secret = Math.max(pii.suspect_secret ?? 0, 1);
-  db.prepare("UPDATE obs_records SET state = 'review', problem = ?, pii_json = ?, updated_at = ? WHERE id = ? AND state IN ('open', 'classified')").run(RECORD_PROBLEM, JSON.stringify(pii), at, recordId);
+  db.prepare("UPDATE obs_records SET state = 'review', problem = ?, updated_at = ? WHERE id = ? AND state IN ('open', 'classified')").run(RECORD_PROBLEM, at, recordId);
 }
 
 /** One tick of an Observer job. Pure over its deps (tests drive it with a fake checkpoint, a fake Connect and the test clock). */

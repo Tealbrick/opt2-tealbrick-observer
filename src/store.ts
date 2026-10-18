@@ -504,6 +504,8 @@ export interface RecordView {
   secret: boolean;
   /** a token in the text looks like a secret (suspect_secret): held for the owner, shown as "possible secret" */
   possibleSecret: boolean;
+  /** Observer could not window or route it (`routing_failed`): held for the owner with its text hidden, NOT a possible secret */
+  problem: string | null;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;
@@ -518,7 +520,10 @@ export const isPossibleSecret = (r: Row): boolean => (parsePii(r.pii_json).suspe
 const ROUTED_STATES = new Set(["review", "approved", "delivered", "dropped"]);
 /** Subject and author handle stay out of every answer while the record is a possible secret, or is not routed yet: a subject can carry the token itself,
  *  and a list title, a heading or an Activity row would show it in clear text. */
-export const metaHidden = (r: Row): boolean => isPossibleSecret(r) || !ROUTED_STATES.has(str(r.state));
+export const metaHidden = (r: Row): boolean => isPossibleSecret(r) || hasProblem(r) || !ROUTED_STATES.has(str(r.state));
+/** Observer could not window or route the record (jobs.ts holdForOwner): the same safe default as a possible secret (held, text
+ *  opens hidden, deliver as is only with acknowledged: true), with its own wording. */
+export const hasProblem = (r: Row): boolean => r.problem !== null && r.problem !== undefined;
 /** Record summary: no message text (lists never carry text). */
 export function recordView(r: Row): RecordView {
   return {
@@ -532,6 +537,7 @@ export function recordView(r: Row): RecordView {
     pii: parsePii(r.pii_json),
     secret: Number(r.secret) === 1,
     possibleSecret: isPossibleSecret(r),
+    problem: strOrNull(r.problem),
     ruleId: strOrNull(r.rule_id),
     actionable: Number(r.actionable) === 1,
     decidedBy: strOrNull(r.decided_by),
@@ -730,8 +736,12 @@ export function decideRecord(
   // the owner decides on the revision they read: a later edit or message changed the record, so the decision would be on text they did not see
   if (d.revision !== undefined && d.revision !== revision) throw new TbError("revision_changed", "the record changed after you read it; read it again before you decide", 409);
   // a record held as a possible secret is delivered AS IT IS only when the owner says so, on purpose (a UI gate alone is not enough)
-  if (d.decision === "deliver" && isPossibleSecret(r) && d.acknowledged !== true) {
-    throw new TbError("acknowledgement_required", "this record was held as a possible secret; delivering it as it is needs acknowledged: true after you read the text", 400);
+  if (d.decision === "deliver" && (isPossibleSecret(r) || hasProblem(r)) && d.acknowledged !== true) {
+    throw new TbError(
+      "acknowledgement_required",
+      isPossibleSecret(r) ? "this record was held as a possible secret; delivering it as it is needs acknowledged: true after you read the text" : "this record was held for you; delivering it as it is needs acknowledged: true after you read the text",
+      400,
+    );
   }
   if (str(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${str(r.state)}, not waiting for review`, 409);
   if (deliver) {

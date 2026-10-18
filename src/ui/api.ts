@@ -35,6 +35,8 @@ export interface RecordSummary {
   secret: boolean;
   /** a token in the text looks like a secret (suspect_secret): held for the owner */
   possibleSecret: boolean;
+  /** routing_failed: Observer could not sort the record; held for the owner, text opens hidden (NOT a possible secret) */
+  problem?: string | null;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;

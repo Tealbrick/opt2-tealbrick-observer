@@ -58,6 +58,10 @@ export function Marked({ text, spans, redacted }: { text: string; spans: Message
   );
 }
 
+/** The fixed sentence for a record Observer could not sort (problem routing_failed). */
+export const UNSORTED = "Observer could not sort this record. It is held for you. Its text opens hidden.";
+const isUnsorted = (r: Pick<RecordSummary, "problem">): boolean => r.problem === "routing_failed";
+
 /** Tags that say why a record waits. */
 export function Reasons({ r }: { r: RecordSummary }) {
   const classes = Object.entries(r.pii)
@@ -66,13 +70,14 @@ export function Reasons({ r }: { r: RecordSummary }) {
   return (
     <span className="tb-row ob-tags">
       {r.possibleSecret ? <Tag status="needs-you">possible secret</Tag> : null}
+      {isUnsorted(r) ? <Tag status="needs-you">could not sort</Tag> : null}
       {r.secret ? <Tag status="needs-you">secret removed</Tag> : null}
       {classes.map((c) => (
         <Tag key={c} {...(SENSITIVE.has(c) ? { status: "needs-you" as const } : {})}>
           {classLabel(c)}
         </Tag>
       ))}
-      {!r.possibleSecret && !r.secret && classes.length === 0 ? <Tag>no route</Tag> : null}
+      {!r.possibleSecret && !isUnsorted(r) && !r.secret && classes.length === 0 ? <Tag>no route</Tag> : null}
     </span>
   );
 }
@@ -100,14 +105,17 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
   const found = Object.entries(r.pii).filter(([, n]) => n > 0);
   // a token that looks like a secret holds the record as a whole. A message with no span that marks it (a token split over messages, a message too big
   // to mark, a hit in the subject or the handle) is redacted as a whole: all of its text becomes [possible secret]
-  const wholeMessage = (m: RecordDetail["messages"][number]) => r.possibleSecret && !m.spans.some((s) => s.class === "suspect_secret");
-  const heldWhole = r.messages.some((m) => m.text !== null && wholeMessage(m));
-  const showRedacted = r.possibleSecret ? !revealed : redacted;
+  // a record Observer could not sort has the same safe default with its own words: every message opens hidden
+  const unsorted = isUnsorted(r);
+  const hidden = r.possibleSecret || unsorted;
+  const wholeMessage = (m: RecordDetail["messages"][number]) => unsorted || (r.possibleSecret && !m.spans.some((s) => s.class === "suspect_secret"));
+  const heldWhole = r.possibleSecret && r.messages.some((m) => m.text !== null && wholeMessage(m));
+  const showRedacted = hidden ? !revealed : redacted;
   // Knowledge is required: without it nothing can be delivered
   const knowledgeMissing = !available("knowledge");
   const canDeliver = hasText && !r.secret && destination !== "" && !knowledgeMissing && !busy;
   // deliver as is of a possible secret needs the tick, and the tick needs the original text on screen
-  const canAsIs = canDeliver && (!r.possibleSecret || (revealed && readIt));
+  const canAsIs = canDeliver && (!hidden || (revealed && readIt));
 
   type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";
   const send = async (decision: Decision) => {
@@ -117,7 +125,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
       revision: r.revision, // the version the owner read: a newer one is refused (revision_changed)
       decision,
       ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}),
-      ...(decision === "deliver" && r.possibleSecret ? { acknowledged: true } : {}),
+      ...(decision === "deliver" && hidden ? { acknowledged: true } : {}),
     });
     onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Delivery starts in a later version: the record waits on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
   };
@@ -156,11 +164,16 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
           </span>
         </Notice>
       ) : null}
+      {unsorted ? (
+        <Notice tone="needs-you" role="status">
+          <span>{UNSORTED}</span>
+        </Notice>
+      ) : null}
       <dl className="kv">
         <dt>Source</dt>
         <dd>{sourceLabels.get(r.source) ?? "A removed source"}</dd>
         <dt>Route</dt>
-        <dd>{r.possibleSecret ? "Held for your review, whatever the rules say" : rule ? `Rule ${rule.position}: ${matchPhrase(rule.match, sourceLabels)} → ${actionPhrase(rule.action)}` : "No rule matched"}</dd>
+        <dd>{hidden ? "Held for your review, whatever the rules say" : rule ? `Rule ${rule.position}: ${matchPhrase(rule.match, sourceLabels)} → ${actionPhrase(rule.action)}` : "No rule matched"}</dd>
         <dt>Found</dt>
         <dd>{found.length === 0 ? "No personal data" : found.map(([c, n]) => `${classLabel(c)} (${n})`).join(", ")}</dd>
         <dt>Messages</dt>
@@ -183,7 +196,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
           </span>
         </Notice>
       ) : null}
-      {r.possibleSecret && hasText ? (
+      {hidden && hasText ? (
         <div className="tb-ctas">
           <Button
             size="sm"
@@ -196,7 +209,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
           </Button>
         </div>
       ) : null}
-      {!r.possibleSecret && marked && hasText ? (
+      {!hidden && marked && hasText ? (
         <Segmented
           label="Show the text"
           value={redacted ? "redacted" : "marked"}
@@ -215,7 +228,11 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
             {m.text === null ? (
               <em>{m.deleted ? "Deleted in the source." : "The text is gone."}</em>
             ) : wholeMessage(m) && showRedacted ? (
-              <mark className="is-secret">{REDACTION_LABELS.suspect_secret}</mark>
+              unsorted ? (
+                <mark>[text hidden]</mark>
+              ) : (
+                <mark className="is-secret">{REDACTION_LABELS.suspect_secret}</mark>
+              )
             ) : (
               <Marked text={m.text} spans={m.spans} redacted={showRedacted} />
             )}
@@ -246,7 +263,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
               options={DESTINATIONS.map((d) => ({ value: d.id, label: d.name, disabled: !available(d.id), ...(available(d.id) ? {} : { meta: "not available" }) }))}
             />
           </div>
-          {r.possibleSecret ? <Check checked={readIt} onChange={setReadIt} disabled={busy || !revealed} title="I read the original text above. The marked part is not a secret." body={revealed ? "Deliver as is stays off until you tick this. Deliver redacted needs no tick." : "Show the original text first. Deliver redacted needs no tick."} /> : null}
+          {hidden ? <Check checked={readIt} onChange={setReadIt} disabled={busy || !revealed} title={r.possibleSecret ? "I read the original text above. The marked part is not a secret." : "I read the original text above. It may be delivered as it is."} body={revealed ? "Deliver as is stays off until you tick this. Deliver redacted needs no tick." : "Show the original text first. Deliver redacted needs no tick."} /> : null}
         </div>
       )}
       <div className="tb-ctas">

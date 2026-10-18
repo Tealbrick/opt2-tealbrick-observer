@@ -62,6 +62,7 @@ const rec = (id: string, thread: string | null, extra: Record<string, unknown> =
   pii: {},
   secret: false,
   possibleSecret: false,
+  problem: null,
   ruleId: null,
   actionable: false,
   decidedBy: null,
@@ -76,6 +77,8 @@ export const REC_BANK = rec("rec_bank", "Invoice question from M. Horak", { pii:
 export const REC_KEY = rec("rec_key", null, { pii: { suspect_secret: 1 }, possibleSecret: true });
 export const REC_SECRET = rec("rec_secret", "Deploy notes", { pii: { secret: 1 }, secret: true });
 export const REC_PLAIN = rec("rec_plain", null, { source: "src_tg" });
+/** A record Observer could not sort (routing_failed): held, text hidden, not a possible secret. */
+export const REC_UNSORTED = rec("rec_unsorted", null, { problem: "routing_failed" });
 const message = (text: string | null, spans: unknown[], extra: Record<string, unknown> = {}) => ({ conversation: "clients", id: `m_${Math.random().toString(36).slice(2, 8)}`, thread: null, sentAt: iso(NOW - 3 * 3_600_000), editedAt: null, deleted: false, author: "email:horak@example.com", authorKind: "person", text, spans, ...extra });
 export function detailOf(r: ReturnType<typeof rec>): Record<string, unknown> {
   if (r.id === "rec_bank") return { ...r, messages: [message(msgText, [spanOf(msgText, "CZ6508000000192000145399", "iban"), spanOf(msgText, "+420 123 456 789", "phone")]), message("Thanks, I will tell accounting.", [], { author: "me", authorKind: "self" })] };
@@ -83,6 +86,7 @@ export function detailOf(r: ReturnType<typeof rec>): Record<string, unknown> {
     const t = `New key for the booking system: ${looksLikeKey()}`;
     return { ...r, messages: [message(t, [spanOf(t, looksLikeKey(), "suspect_secret")], { author: "" })] };
   }
+  if (r.id === "rec_unsorted") return { ...r, messages: [message("Can you call the clinic about the order?", [])] };
   if (r.id === "rec_secret") return { ...r, messages: [message("Deploy notes: the key is [secret removed]", [])] };
   return { ...r, messages: [message("Lunch on Friday?", [])] };
 }
