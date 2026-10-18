@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.tealbrick.com/opt2/contracts/messages/1.schema.json",
+  "title": "messages/1 \u2014 one message row of the Connect `messages` dataset (data_pull)",
+  "description": "v0.1.42 (C230, R3, knowledge S-9, FOUNDRY-DESIGN v2 \u00a73.4). Producer: connect (data_pull dataset `messages`). Consumers: knowledge (foundry), observer. Text is untrusted input (APP-11(f)): `untrusted` is always true. Extra members are allowed and ignored (L24). A provider deletion arrives as a row with deleted: true and empty text. `id` is unique per (account, conversation); consumers dedupe on (account, conversation, id). `author.handle` is `<channel>:<value>`: canonical (normalizeHandle) for buzz, slack and telegram; the raw provider id for other channels; the producer adds the prefix and normalises.",
+  "$defs": {
+    "row": {
+      "type": "object",
+      "required": [
+        "id",
+        "conversation",
+        "sentAt",
+        "author",
+        "text",
+        "attachments",
+        "untrusted"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "conversation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "thread": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "sentAt": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+        },
+        "editedAt": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,3})?Z$"
+        },
+        "deleted": {
+          "type": "boolean"
+        },
+        "author": {
+          "type": "object",
+          "required": [
+            "kind",
+            "handle"
+          ],
+          "properties": {
+            "kind": {
+              "enum": [
+                "person",
+                "bot",
+                "self"
+              ]
+            },
+            "handle": {
+              "type": "string",
+              "maxLength": 256,
+              "pattern": "^[a-z0-9_-]{1,32}:.+$"
+            },
+            "display": {
+              "type": "string",
+              "maxLength": 128
+            }
+          }
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "attachments": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "mime",
+              "bytes"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 255
+              },
+              "mime": {
+                "type": "string",
+                "maxLength": 127
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "untrusted": {
+          "const": true
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "text was cut to the 64 KiB cap"
+        },
+        "attachmentsTruncated": {
+          "type": "boolean",
+          "description": "more than 32 attachments existed"
+        }
+      },
+      "if": {
+        "properties": {
+          "deleted": {
+            "const": true
+          }
+        },
+        "required": [
+          "deleted"
+        ]
+      },
+      "then": {
+        "properties": {
+          "text": {
+            "maxLength": 0
+          },
+          "attachments": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    "page": {
+      "type": "object",
+      "description": "data_pull answer for dataset messages: \u2264 200 rows, \u2264 2 MiB (S-7).",
+      "required": [
+        "rows",
+        "nextCursor",
+        "exhausted"
+      ],
+      "properties": {
+        "rows": {
+          "type": "array",
+          "maxItems": 200,
+          "items": {
+            "$ref": "#/$defs/row"
+          }
+        },
+        "nextCursor": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 512
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "anchor": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "exhausted": {
+          "type": "boolean"
+        },
+        "retryAfterS": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    }
+  },
+  "$ref": "#/$defs/page"
+}
