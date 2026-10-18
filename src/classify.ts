@@ -3,8 +3,8 @@
 // marker that ingest left where it removed one (ingest.ts), so a record whose secret was already cut out is still a secret record.
 import { isActionable } from "./actionable.ts";
 import { type DetectConfig, detectAll, mergeSpans } from "./detect/index.ts";
-import { LABELS } from "./detect/redact.ts";
 import { normalize } from "./detect/normalize.ts";
+import { LABELS } from "./detect/redact.ts";
 import { detectSecrets } from "./detect/secret.ts";
 import { detectSuspect } from "./detect/suspect.ts";
 import type { DetectClass, Detection, Span } from "./detect/types.ts";

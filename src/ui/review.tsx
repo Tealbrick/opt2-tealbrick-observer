@@ -98,8 +98,10 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
   const hasText = r.messages.some((m) => m.text !== null);
   const marked = r.messages.some((m) => m.spans.length > 0);
   const found = Object.entries(r.pii).filter(([, n]) => n > 0);
-  // a token that looks like a secret holds the record as a whole; when no span marks it, redacting replaces the whole text
-  const heldWhole = r.possibleSecret && !r.messages.some((m) => m.spans.some((s) => s.class === "suspect_secret"));
+  // a token that looks like a secret holds the record as a whole. A message with no span that marks it (a token split over messages, a message too big
+  // to mark, a hit in the subject or the handle) is redacted as a whole: all of its text becomes [possible secret]
+  const wholeMessage = (m: RecordDetail["messages"][number]) => r.possibleSecret && !m.spans.some((s) => s.class === "suspect_secret");
+  const heldWhole = r.messages.some((m) => m.text !== null && wholeMessage(m));
   const showRedacted = r.possibleSecret ? !revealed : redacted;
   // Knowledge is required: without it nothing can be delivered
   const knowledgeMissing = !available("knowledge");
@@ -107,16 +109,31 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
   // deliver as is of a possible secret needs the tick, and the tick needs the original text on screen
   const canAsIs = canDeliver && (!r.possibleSecret || (revealed && readIt));
 
-  const decide = (decision: "deliver" | "deliver_redacted" | "drop" | "keep") =>
+  type Decision = "deliver" | "deliver_redacted" | "drop" | "keep";
+  const send = async (decision: Decision) => {
+    const toPlace = decision === "deliver" || decision === "deliver_redacted";
+    await run("review_decide", {
+      recordId: r.id,
+      revision: r.revision, // the version the owner read: a newer one is refused (revision_changed)
+      decision,
+      ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}),
+      ...(decision === "deliver" && r.possibleSecret ? { acknowledged: true } : {}),
+    });
+    onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Delivery starts in a later version: the record waits on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
+  };
+  const decide = (decision: Decision) =>
     act(async () => {
-      const toPlace = decision === "deliver" || decision === "deliver_redacted";
-      await run("review_decide", {
-        recordId: r.id,
-        decision,
-        ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}),
-        ...(decision === "deliver" && r.possibleSecret ? { acknowledged: true } : {}),
-      });
-      onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Delivery starts in a later version: the record waits on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
+      try {
+        await send(decision);
+      } catch (e) {
+        // an edit or a new message landed after the owner read the record: show the new version, take the tick back, say so
+        if ((e as { code?: unknown } | null)?.code === "revision_changed") {
+          setReadIt(false);
+          setRevealed(false);
+          await rec.reload();
+        }
+        throw e;
+      }
     });
 
   return (
@@ -162,7 +179,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
       {heldWhole && hasText ? (
         <Notice tone="neutral" role="status">
           <span>
-            <strong>This record was held as a whole.</strong> Observer could not mark the part that looks like a secret. Deliver redacted replaces all of the text with [possible secret].
+            <strong>This record was held as a whole.</strong> In a message where Observer could not mark the part that looks like a secret, all of the text is redacted. Deliver redacted replaces all of it with [possible secret].
           </span>
         </Notice>
       ) : null}
@@ -197,7 +214,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
             <b>{m.authorKind === "self" ? "You" : m.author || "Sender hidden"}:</b>{" "}
             {m.text === null ? (
               <em>{m.deleted ? "Deleted in the source." : "The text is gone."}</em>
-            ) : heldWhole && showRedacted ? (
+            ) : wholeMessage(m) && showRedacted ? (
               <mark className="is-secret">{REDACTION_LABELS.suspect_secret}</mark>
             ) : (
               <Marked text={m.text} spans={m.spans} redacted={showRedacted} />

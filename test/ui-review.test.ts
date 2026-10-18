@@ -85,7 +85,7 @@ describe("Review", () => {
     await click(control(detail(m.host), "Deliver redacted"));
     await flush();
     const c = lastCall("review_decide");
-    assert.deepEqual(c.input, { recordId: "rec_bank", decision: "deliver_redacted", destination: "knowledge" });
+    assert.deepEqual(c.input, { recordId: "rec_bank", revision: 1, decision: "deliver_redacted", destination: "knowledge" });
     assertWriteHeaders(c);
     assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. Delivery starts in a later version: the record waits on the Activity page\./);
     assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent?.slice(0, 8)), ["Messages", "Deploy n", "Messages"]);
@@ -100,7 +100,7 @@ describe("Review", () => {
     await choose(m.host, trigger, "Operator Inbox");
     await click(control(detail(m.host), "Deliver as is"));
     await flush();
-    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_bank", decision: "deliver", destination: "inbox" });
+    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_bank", revision: 1, decision: "deliver", destination: "inbox" });
     await m.unmount();
   });
 
@@ -150,7 +150,7 @@ describe("Review", () => {
     assert.ok(!control(d, "Deliver redacted").disabled);
     await click(control(d, "Deliver redacted"));
     await flush();
-    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_key", decision: "deliver_redacted", destination: "knowledge" });
+    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_key", revision: 1, decision: "deliver_redacted", destination: "knowledge" });
     await m.unmount();
   });
 
@@ -176,7 +176,7 @@ describe("Review", () => {
     await click(control(d, "Deliver as is"));
     await flush();
     const c = lastCall("review_decide");
-    assert.deepEqual(c.input, { recordId: "rec_key", decision: "deliver", destination: "knowledge", acknowledged: true });
+    assert.deepEqual(c.input, { recordId: "rec_key", revision: 1, decision: "deliver", destination: "knowledge", acknowledged: true });
     assertWriteHeaders(c);
     await m.unmount();
   });
@@ -193,12 +193,54 @@ describe("Review", () => {
     const m = await mountReview("rec_key");
     const d = detail(m.host);
     assert.match(d.textContent ?? "", /This record was held as a whole\./);
-    assert.match(d.textContent ?? "", /Deliver redacted replaces all of the text with \[possible secret\]\./);
+    assert.match(d.textContent ?? "", /all of the text is redacted\. Deliver redacted replaces all of it with \[possible secret\]\./);
     assert.deepEqual([...d.querySelectorAll(".ob-msgs mark")].map((x) => x.textContent), ["[possible secret]"]);
     assert.ok(!(d.textContent ?? "").includes(looksLikeKey()));
     assert.ok(!control(d, "Deliver redacted").disabled);
     await click(control(d, "Show the original text"));
     assert.ok((d.textContent ?? "").includes(looksLikeKey()));
+    await m.unmount();
+  });
+
+  it("held as a whole works per message: a message with no marked span is fully redacted, one with a span only at the span", async () => {
+    reset();
+    stub.out.review_get = (i: Record<string, unknown>) => {
+      const d = detailOf(REC_KEY) as { messages: Record<string, unknown>[] };
+      const split = `the second half of it is ${looksLikeKey().slice(8)}`; // a token split over messages: no span marks this part
+      d.messages.push({ ...(d.messages[0] as object), id: "m_split", text: split, spans: [] });
+      return { record: { ...d, id: i.id } };
+    };
+    const m = await mountReview("rec_key");
+    const d = detail(m.host);
+    const marks = [...d.querySelectorAll(".ob-msgs mark")].map((x) => x.textContent);
+    assert.deepEqual(marks, ["[possible secret]", "[possible secret]"]);
+    const lines = [...d.querySelectorAll(".ob-msgs p")].map((p) => p.textContent);
+    assert.match(lines[0] ?? "", /^Sender hidden: New key for the booking system: \[possible secret\]$/, "the marked message is redacted at the span only");
+    assert.equal(lines[1], "Sender hidden: [possible secret]", "the other message is redacted whole");
+    assert.ok(!(d.textContent ?? "").includes(looksLikeKey().slice(8)));
+    await click(control(d, "Show the original text"));
+    assert.ok((d.textContent ?? "").includes(looksLikeKey().slice(8)), "the owner can still read it on purpose");
+    await m.unmount();
+  });
+
+  it("an edit between read and decide: revision_changed refreshes the record, takes the tick back and tells the owner", async () => {
+    reset();
+    stub.out.review_get = () => ({ record: detailOf(REC_KEY) });
+    const m = await mountReview("rec_key");
+    const d = detail(m.host);
+    await click(control(d, "Show the original text"));
+    await click(d.querySelector('.tb-check input[type="checkbox"]') as Element);
+    assert.ok(!control(d, "Deliver as is").disabled);
+    stub.fail.review_decide = { status: 409, code: "revision_changed" };
+    const reads = callsOf("review_get").length;
+    await click(control(d, "Deliver as is"));
+    await flush();
+    assert.equal(lastCall("review_decide").input.revision, 1, "the revision the owner read went out");
+    assert.deepEqual(alerts(m.host), ["This record changed after you opened it. It is shown again as it is now. Read it again before you decide."]);
+    assert.ok(callsOf("review_get").length > reads, "the record is read again");
+    assert.ok(control(d, "Show the original text"), "the original is hidden again");
+    assert.ok(control(d, "Deliver as is").disabled, "the tick is gone");
+    assert.equal(rows(m.host).length, 4, "nothing was decided");
     await m.unmount();
   });
 
@@ -242,7 +284,7 @@ describe("Review", () => {
     await click(control(detail(m.host), "Confirm: drop"));
     await flush();
     const c = lastCall("review_decide");
-    assert.deepEqual(c.input, { recordId: "rec_bank", decision: "drop" });
+    assert.deepEqual(c.input, { recordId: "rec_bank", revision: 1, decision: "drop" });
     assertWriteHeaders(c);
     assert.match(m.host.textContent ?? "", /Dropped\./);
     await m.unmount();
@@ -258,7 +300,7 @@ describe("Review", () => {
     const back = await mountReview();
     await click(control(detail(back.host), "Keep the delivered version"));
     await flush();
-    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_bank", decision: "keep" });
+    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_bank", revision: 2, decision: "keep" });
     await back.unmount();
   });
 

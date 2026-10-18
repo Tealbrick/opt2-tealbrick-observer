@@ -193,6 +193,8 @@ export function explain(e: unknown): string {
       return "This delivery is not from your last decision on the record. Decide the record in Review.";
     case "rule_locked":
       return "Rule 0 is locked. It cannot be changed, moved or deleted.";
+    case "revision_changed":
+      return "This record changed after you opened it. It is shown again as it is now. Read it again before you decide.";
     case "rules_mismatch":
       return "The rules changed in the meantime. Reload the page and try again.";
     case "rules_limit":
