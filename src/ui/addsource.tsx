@@ -2,7 +2,7 @@
 // Next of step 3 (source_add), with its live job paused: nothing is read until the owner presses Start live (DESIGN §3.2).
 import { Choices, Field, Notice, Select, StepFlow, Textarea, TextInput } from "@opt2-tealbrick/ui";
 import { useState } from "react";
-import { type ConnectAccount, count, everyLabel, keptSentence, kindName, plural, run } from "./api.ts";
+import { asAccount, type ConnectAccount, count, everyLabel, keptSentence, kindName, plural, run } from "./api.ts";
 import { Check, Failure, useAct } from "./common.tsx";
 import { HistoryFields, useHistory } from "./history.tsx";
 
@@ -32,7 +32,10 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
   const [retention, setRetention] = useState("");
   const [created, setCreated] = useState<{ id: string } | null>(null);
   const make = useAct();
-  const account = accounts.find((a) => a.id === accountId) ?? null;
+  const load = useAct();
+  // the list names the accounts only; the conversations, history flag and kept days of the picked one come with ONE catalog read
+  const [details, setDetails] = useState<ConnectAccount | null>(null);
+  const account = details && details.id === accountId ? details : null;
   const history = useHistory(created?.id ?? null);
   // every source can read history: with `history` from Connect's catalog it reaches back further, without it Observer reads
   // what Connect kept (kinds and capabilities come from Connect, not from a list of services)
@@ -41,7 +44,14 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
   const chooseAccount = (id: string) => {
     setAccountId(id);
     setPicked([]);
+    setDetails(null);
     setLabel(accounts.find((a) => a.id === id)?.label ?? "");
+    void load.act(async () => {
+      const out = await run("sources_available", { account: id });
+      const found = out.accounts.map(asAccount).find((a) => a.id === id);
+      if (!found) throw Object.assign(new Error("not shared"), { code: "account_not_shared" });
+      setDetails(found);
+    });
   };
   const toggle = (id: string, on: boolean) => setPicked((p) => (on ? [...p, id] : p.filter((x) => x !== id)));
 
@@ -88,9 +98,20 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
                   label="Account"
                   value={accountId}
                   onChange={chooseAccount}
-                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: `${kindName(a.kind)} · ${plural(a.conversations.length, "conversation")}`, ...(a.historyCapable ? {} : { note: keptSentence(a.retentionDays) }) }))}
+                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: kindName(a.kind) }))}
                 />
               )}
+              <Failure message={load.error} />
+              {accountId && !account && !load.error ? (
+                <p className="tb-soft" role="status">
+                  Reading the account from Connect.
+                </p>
+              ) : null}
+              {account ? (
+                <p className="tb-soft" role="status">
+                  {plural(account.conversations.length, "conversation")}.{account.historyCapable ? "" : ` ${keptSentence(account.retentionDays)}`}
+                </p>
+              ) : null}
             </div>
           ),
         },

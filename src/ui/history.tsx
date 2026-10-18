@@ -2,7 +2,7 @@
 // last step of "Add source" and by "Read history…" on a source card.
 import { Button, Dialog, Field, TextInput } from "@opt2-tealbrick/ui";
 import { useEffect, useState } from "react";
-import { type ConnectAccount, count, keptSentence, type Out, run, type Source } from "./api.ts";
+import { count, keptSentence, type Out, run, type Source } from "./api.ts";
 import { Failure, useAct } from "./common.tsx";
 
 const DAY = 86_400_000;
@@ -79,8 +79,8 @@ export function HistoryFields({ h, keptDays }: { h: ReturnType<typeof useHistory
 }
 
 /** "Read history…" on a source card. */
-export function HistoryDialog({ source, account, onClose, onStarted }: { source: Source | null; account?: ConnectAccount | undefined; onClose: () => void; onStarted: () => void }) {
-  const kept = account && !account.historyCapable ? account.retentionDays : undefined;
+export function HistoryDialog({ source, onClose, onStarted }: { source: Source | null; onClose: () => void; onStarted: () => void }) {
+  const kept = source && source.historyCapable === false ? (source.keptDays ?? null) : undefined;
   const h = useHistory(source?.id ?? null);
   const go = async () => {
     if (await h.start()) {

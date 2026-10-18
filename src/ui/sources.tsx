@@ -3,7 +3,7 @@
 import { Button, Dialog, EmptyState, Notice, Progress, Tag } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 import { AddSource } from "./addsource.tsx";
-import { asAccount, type ConnectAccount, count, dateOf, type Job, keptSentence, kindName, plural, run, type Source, until } from "./api.ts";
+import { asAccount, count, dateOf, type Job, keptSentence, kindName, plural, run, type Source, until } from "./api.ts";
 import { ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useAct, useLoad } from "./common.tsx";
 import { HistoryDialog } from "./history.tsx";
 
@@ -35,11 +35,11 @@ function liveStatus(job: Job | undefined, source: Source): { tone: Tone; text: s
 
 const HISTORY_STATE: Record<string, string> = { queued: "queued", running: "reading", waiting: "waiting to retry", paused: "paused", failed: "stopped after failures", cancelled: "stopped", done: "done" };
 
-function History({ source, job, account }: { source: Source; job: Job | undefined; account: ConnectAccount | undefined }) {
+function History({ source, job }: { source: Source; job: Job | undefined }) {
   if (!job) {
-    // what a source can read comes from Connect (its catalog), not from a list of services
-    return account && !account.historyCapable ? (
-      <span className="tb-hint">{keptSentence(account.retentionDays)}</span>
+    // what a source can read comes from Connect's catalog (stored at source_add), not from a list of services
+    return source.historyCapable === false ? (
+      <span className="tb-hint">{keptSentence(source.keptDays ?? null)}</span>
     ) : (
       <span className="tb-hint">History is not read. Observer reads only new messages.</span>
     );
@@ -60,7 +60,6 @@ function History({ source, job, account }: { source: Source; job: Job | undefine
 
 function SourceCard({
   source,
-  account,
   jobs,
   busy,
   onJob,
@@ -68,7 +67,6 @@ function SourceCard({
   onRemove,
 }: {
   source: Source;
-  account: ConnectAccount | undefined;
   jobs: Job[];
   busy: boolean;
   onJob: (job: Job, action: "pause" | "resume" | "cancel" | "start") => void;
@@ -99,11 +97,13 @@ function SourceCard({
         </dd>
         <dt>History</dt>
         <dd>
-          <History source={source} job={hist} account={account} />
+          <History source={source} job={hist} />
         </dd>
       </dl>
       {live?.state === "failed" && live.lastError ? <p className="tb-hint">Last error: {live.lastError}</p> : null}
       {hist?.state === "failed" && hist.lastError ? <p className="tb-hint">History error: {hist.lastError}</p> : null}
+      {live?.lastError && live.state === "waiting" ? <p className="tb-hint">{live.lastError}</p> : null}
+      {live?.note ? <p className="tb-hint">{live.note}</p> : null}
       <div className="tb-ctas">
         {live && ["running", "queued", "waiting"].includes(live.state) ? (
           <Button size="sm" disabled={busy} onClick={() => onJob(live, "pause")}>
@@ -218,7 +218,6 @@ export function SourcesPage() {
             <SourceCard
               key={s.id}
               source={s}
-              account={d.accounts.find((a) => a.id === s.account)}
               jobs={d.jobs.filter((j) => j.source === s.id)}
               busy={busy}
               onJob={(j, a) => void control(j, a)}
@@ -229,7 +228,7 @@ export function SourcesPage() {
         </div>
       )}
       {d ? <AddSource open={adding} accounts={d.accounts} onClose={() => setAdding(false)} onDone={() => void sources.reload()} /> : null}
-      <HistoryDialog source={history} account={history ? d?.accounts.find((a) => a.id === history.account) : undefined} onClose={() => setHistory(null)} onStarted={() => void sources.reload()} />
+      <HistoryDialog source={history} onClose={() => setHistory(null)} onStarted={() => void sources.reload()} />
       <Dialog
         open={removing !== null}
         title="Remove this source?"

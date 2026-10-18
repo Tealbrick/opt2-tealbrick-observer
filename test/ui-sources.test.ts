@@ -33,6 +33,18 @@ describe("Sources", () => {
     control(tg, "Read history…");
     await m.unmount();
   });
+  it("a live job that restarted from a fresh anchor shows its note; a waiting job shows why it waits", async () => {
+    reset();
+    const note = "Observer restarted reading from now. Messages between 2026-10-17 12:00 UTC and 2026-10-17 19:01 UTC may be missing: start a history read to fill them.";
+    stub.jobs = (stub.jobs as Record<string, unknown>[]).map((j) =>
+      j.id === "job_gmail_live" ? { ...j, note } : j.id === "job_tg_live" ? { ...j, lastError: "Connect holds this read for your approval." } : j,
+    );
+    const m = await mount(h(await page(), {}));
+    assert.ok((card(m.host, "Work inbox").textContent ?? "").includes(note));
+    assert.ok((card(m.host, "Clinic partners").textContent ?? "").includes("Connect holds this read for your approval."));
+    assert.ok(!(card(m.host, "Clinic partners").textContent ?? "").includes("restarted"), "quiet on good: no note, no line");
+    await m.unmount();
+  });
   it("Read history… on a source without history says what Connect kept and how far back it reaches", async () => {
     reset();
     const m = await mount(h(await page(), {}));
@@ -281,8 +293,12 @@ describe("Add source", () => {
     reset();
     const m = await mountFlow();
     const dialog = openDialog(m.host);
-    assert.match(dialog.textContent ?? "", /Front desk bot.*Observer reads from the time you share it, plus what Connect kept \(up to 30 days\)\./s);
+    assert.ok(!(dialog.textContent ?? "").includes("what Connect kept"), "the list alone reads no catalog: nothing is known yet");
+    const before = callsOf("sources_available").length;
     await click(dialog.querySelectorAll('[role="radio"]')[1] as Element);
+    await flush();
+    assert.deepEqual(callsOf("sources_available").slice(before).map((c) => c.input), [{ account: "acc_tg" }], "ONE account's catalog, when it is picked");
+    assert.match(step(dialog, 0).textContent ?? "", /1 conversation\. Observer reads from the time you share it, plus what Connect kept \(up to 30 days\)\./);
     await next(dialog);
     await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
     await next(dialog);

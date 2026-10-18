@@ -40,10 +40,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
 export const ALL_TARGETS = ["connect", "knowledge", "kanban", "inbox"];
 export const RULE_ZERO = "rul_00000000000000000000000000";
 
-export const SRC_GMAIL = { id: "src_gmail", label: "Work inbox", kind: "gmail", account: "acc_gmail", conversations: ["clients", "suppliers"], live: { state: "running", lastReadAt: null, nextAt: null }, history: { state: "running", done: 18240, total: 50000, since: "2026-01-01T00:00:00.000Z" } };
-export const SRC_TG = { id: "src_tg", label: "Clinic partners", kind: "telegram", account: "acc_tg", conversations: ["group"], live: { state: "waiting", lastReadAt: null, nextAt: iso(NOW + 40_000) }, history: { state: "none", done: 0, total: null, since: null } };
-export const SRC_NEW = { id: "src_new", label: "Team updates", kind: "buzz", account: "acc_buzz", conversations: ["updates"], live: { state: "paused", lastReadAt: null, nextAt: null }, history: { state: "none", done: 0, total: null, since: null } };
-const job = (id: string, source: string, kind: "live" | "backfill", state: string, extra: Record<string, unknown> = {}) => ({ id, source, kind, state, counts: { read: 0, records: 0, failures: 0 }, lastError: null, retryAt: null, ...extra });
+export const SRC_GMAIL = { id: "src_gmail", label: "Work inbox", kind: "gmail", account: "acc_gmail", conversations: ["clients", "suppliers"], live: { state: "running", lastReadAt: null, nextAt: null }, history: { state: "running", done: 18240, total: 50000, since: "2026-01-01T00:00:00.000Z" }, historyCapable: true, keptDays: null };
+export const SRC_TG = { id: "src_tg", label: "Clinic partners", kind: "telegram", account: "acc_tg", conversations: ["group"], live: { state: "waiting", lastReadAt: null, nextAt: iso(NOW + 40_000) }, history: { state: "none", done: 0, total: null, since: null }, historyCapable: false, keptDays: 30 };
+export const SRC_NEW = { id: "src_new", label: "Team updates", kind: "buzz", account: "acc_buzz", conversations: ["updates"], live: { state: "paused", lastReadAt: null, nextAt: null }, history: { state: "none", done: 0, total: null, since: null }, historyCapable: true, keptDays: null };
+const job = (id: string, source: string, kind: "live" | "backfill", state: string, extra: Record<string, unknown> = {}) => ({ id, source, kind, state, counts: { read: 0, records: 0, failures: 0, skipped: 0 }, lastError: null, retryAt: null, note: null, ...extra });
 export const JOBS = [job("job_gmail_live", "src_gmail", "live", "running"), job("job_gmail_hist", "src_gmail", "backfill", "running"), job("job_tg_live", "src_tg", "live", "waiting", { retryAt: iso(NOW + 40_000) }), job("job_new_live", "src_new", "live", "paused")];
 
 /** A string that LOOKS like a key. Built at run time: no secret-shaped literal sits in this file. */
@@ -165,7 +165,10 @@ function answer(op: string, input: Record<string, any>): unknown {
     case "tb.holds_list":
       return { items: [], nextCursor: null };
     case "sources_available":
-      return { accounts: stub.connectMissing ? [] : stub.accounts, connectMissing: stub.connectMissing, targets: stub.targets };
+      // like the server: the list names the accounts only; one account comes with its catalog
+      if (stub.connectMissing) return { accounts: [], connectMissing: true, targets: stub.targets };
+      if (input.account) return { accounts: (stub.accounts as { id: string }[]).filter((a) => a.id === input.account), connectMissing: false, targets: stub.targets };
+      return { accounts: (stub.accounts as { id: string; kind: string; label: string }[]).map(({ id, kind, label }) => ({ id, kind, label })), connectMissing: false, targets: stub.targets };
     case "sources_list":
       return { sources: stub.sources };
     case "jobs_list":

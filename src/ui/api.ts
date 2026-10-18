@@ -17,6 +17,10 @@ export interface Source {
   conversations: string[];
   live: { state: string; lastReadAt: string | null; nextAt: string | null };
   history: { state: string; done: number; total: number | null; since: string | null };
+  /** Connect can page further back than what it kept */
+  historyCapable: boolean;
+  /** days Connect keeps the account's messages (null: it did not say) */
+  keptDays: number | null;
 }
 export type Job = Out<"jobs_list">["jobs"][number];
 export interface RecordSummary {
@@ -111,6 +115,9 @@ export interface ConnectAccount {
   conversations: ConnectConversation[];
 }
 
+/** What widening a source's conversations does not bring by itself (source_update; the edit page shows it). */
+export const WIDEN_NOTE = "Messages of the new conversations from before today come only with a history read.";
+
 /** What a source without history reads (the agreed sentence). */
 export const keptSentence = (days: number | null): string =>
   `Observer reads from the time you share it, plus what Connect kept${days === null ? "" : ` (up to ${days} day${days === 1 ? "" : "s"})`}.`;
@@ -180,6 +187,18 @@ export function explain(e: unknown): string {
       return "History reaches back three years at most. Pick a later date.";
     case "range_invalid":
       return "The end date must be after the start date.";
+    case "since_in_future":
+      return "Pick a start date in the past.";
+    case "connect_failed":
+      return "Observer could not read from Connect. Try again later.";
+    case "connect_held":
+      return "Connect holds this read for your approval. Try again after you decide it.";
+    case "connect_busy":
+      return "Connect is busy. Try again in a minute.";
+    case "call_budget":
+      return "Observer is reading a lot from Connect right now. Try again in a minute.";
+    case "reanchor_required":
+      return "Observer needs Connect to restart this live job. Try again when Connect is available.";
     case "backfill_active":
       return "This source already has a history job. Stop it first.";
     case "job_state_invalid":
