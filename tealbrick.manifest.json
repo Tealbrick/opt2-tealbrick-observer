@@ -2610,6 +2610,18 @@
   ],
   "companions": [
     {
+      "product": "connect",
+      "operations": [
+        "data_accounts_list",
+        "data_catalog",
+        "data_pull"
+      ],
+      "crud": [
+        "read"
+      ],
+      "purpose": "Read the conversations you shared with Observer. Read only: Observer cannot send, edit or delete."
+    },
+    {
       "product": "knowledge",
       "operations": [
         "areas_list",

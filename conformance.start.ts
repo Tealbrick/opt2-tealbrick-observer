@@ -12,9 +12,9 @@ import { startApp } from "@opt2-tealbrick/miniapp-sdk";
 import { app, manifest } from "./src/app.ts";
 import { seedConformance } from "./test/seed.ts";
 
-// Observer cannot read a source yet (Connect's data_* ops do not exist, spec request R3), so no op can create a job or a
-// delivered record. The harness writes the fixtures the agent ops need into the migrated database after boot (a second
-// connection; same file the SDK opened). The ids are named in tealbrick-conformance.json.
+// The harness has no Connect to read a source from, and no op can create a delivered record yet (S4), so the harness writes the
+// fixtures the agent ops need into the migrated database after boot (a second connection; same file the SDK opened). The ids
+// are named in tealbrick-conformance.json.
 function seedFixtures(dataDir: string): void {
   const raw = new DatabaseSync(join(dataDir, "app.db"));
   try {

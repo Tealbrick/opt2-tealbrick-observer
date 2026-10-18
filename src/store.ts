@@ -91,7 +91,8 @@ export interface JobView {
   source: string;
   kind: "live" | "backfill";
   state: string;
-  counts: { read: number; records: number; failures: number };
+  /** read = messages stored, skipped = rows that did not conform to messages/1 (never stored) */
+  counts: { read: number; records: number; failures: number; skipped: number };
   lastError: string | null;
   retryAt: string | null;
 }
@@ -105,7 +106,7 @@ export function jobView(r: Row): JobView {
     source: str(r.source_id),
     kind: r.kind === "backfill" ? "backfill" : "live",
     state: str(r.state),
-    counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures) },
+    counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures), skipped: Number(r.skipped_count ?? 0) },
     lastError: r.last_error === null || r.last_error === undefined ? null : str(r.last_error).slice(0, 280),
     retryAt: iso(r.retry_at),
   };
@@ -120,14 +121,16 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
 /**
  * The job state machine (obs_jobs.state). Only the owner uses start / resume / cancel; an agent can only pause.
  *   start   : paused, never paused by anyone (paused_by NULL: the state a new live job is created in) → queued
- *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time)
+ *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time; after
+ *             `cursor_invalid` also the cursor, so the job reads again from the start of what Connect keeps: messages already
+ *             stored fall on the UNIQUE key, nothing is stored twice)
  *   pause   : queued | running | waiting → paused, paused_by = the caller; pausing a paused job is a no-op
  *   cancel  : queued | running | waiting | paused | failed → cancelled; cancelling a cancelled job is a no-op
  * `done` and `cancelled` are final. Anything else is `job_state_invalid` (409).
  *
- * TODO(S2): the SDK job runner (R1, `defineApp({ jobs })`, ctx.jobs.{start,pause,resume,cancel}) executes the jobs. When it
- * lands, every transition below also calls the runner for `sdk_job_id`, and the runner (not this table) moves
- * queued → running → waiting/done/failed. S1 keeps obs_jobs consistent on its own; nothing reads from a source yet.
+ * This table is the owner's truth. The SDK job runner (src/jobs.ts, `defineApp({ jobs })`) executes the jobs: after every
+ * transition the handler calls `syncSdkJob`, and each tick reads this state before every pull (a paused or cancelled job never
+ * pulls again). The tick moves queued → running → waiting/done/failed.
  */
 export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number): { row: Row; changed: boolean } {
   const state = str(r.state) as JobState;
@@ -161,7 +164,9 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       break;
   }
   db.prepare(
-    `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${reset ? ", consecutive_failures = 0, last_error = NULL, retry_at = NULL" : ""} WHERE id = ?`,
+    `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${
+      reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' THEN NULL ELSE cursor END, consecutive_failures = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
+    } WHERE id = ?`,
   ).run(next, pausedBy, now, str(r.id));
   const row = jobRow(db, str(r.id));
   if (!row) throw notFound("job");
@@ -231,8 +236,7 @@ function sourceParts(db: Db, r: Row): { view: SourceView; liveJobId: string | nu
       kind: str(r.kind),
       account: str(r.account),
       conversations: conversationsOf(r),
-      // TODO(S2): lastReadAt needs a column the job runner writes after each page (obs_jobs has none yet); null until then.
-      live: { state: live ? str(live.state) : "none", lastReadAt: null, nextAt: live ? iso(live.retry_at) : null },
+      live: { state: live ? str(live.state) : "none", lastReadAt: live ? iso(live.last_read_at) : null, nextAt: live ? iso(live.retry_at) : null },
       history: {
         state: hist ? str(hist.state) : "none",
         done: hist ? Number(hist.read_count) : 0,
@@ -277,8 +281,12 @@ export interface NewSource {
   liveIntervalS: number;
   retentionDays: number | null;
   historyCapable: boolean;
+  /** Connect's head position, captured BEFORE the job exists (null: the log was empty); the live job reads forward from it */
+  anchor: string | null;
+  anchorAt: number;
 }
-/** A new source and its live job, PAUSED until the owner presses Start (live watching is off by default, C169). */
+/** A new source and its live job, PAUSED until the owner presses Start (live watching is off by default, C169). The live job
+ *  starts at the anchor: when it is started later, it still reads everything that arrived after the source was added. */
 export function createSource(db: Db, s: NewSource, now: number): { source: string; job: string } {
   const source = `src_${ulid(now)}`;
   const job = `job_${ulid(now)}`;
@@ -288,8 +296,8 @@ export function createSource(db: Db, s: NewSource, now: number): { source: strin
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, now, now);
     db.prepare(
-      `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?)`,
-    ).run(job, source, now, now);
+      `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, cursor, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?, ?, ?, ?)`,
+    ).run(job, source, s.anchor, s.anchor, s.anchorAt, now, now);
   });
   return { source, job };
 }
@@ -397,7 +405,7 @@ export function dropOutOfScope(db: Db, sourceId: string, removedConversations: s
  * One transaction. Documents already delivered to Knowledge stay (the owner deletes them there). This deletes EVERYTHING of the
  * source by design; the privacy setting `onSourceDelete` is NOT consulted here: it is about deletions on the PROVIDER side
  * (a message the provider deleted, DESIGN §5.5), not about the owner removing a source.
- * TODO(S2): also cancel the SDK jobs (`sdk_job_id`) with the runner.
+ * Returns the SDK job ids, so the handler cancels them with the runner (a running tick finds the job gone and ends).
  */
 export function removeSource(db: Db, id: string, now: number): { messagesPurged: number; sdkJobs: string[] } {
   return db.transaction(() => {
@@ -959,11 +967,13 @@ export function reorderRules(db: Db, ids: string[], now: number): RuleView[] {
 export function activeBackfill(db: Db, source: string): boolean {
   return !!db.prepare("SELECT 1 AS x FROM obs_jobs WHERE source_id = ? AND kind = 'backfill' AND state IN ('queued', 'running', 'waiting', 'paused')").get(source);
 }
-export function createBackfill(db: Db, source: string, f: { since: number; until: number | null; maxMessages: number }, now: number): Row {
+/** A history job. `until` is never later than the anchor time: what came after it is the live job's (no gap: overlap is harmless,
+ *  UNIQUE (source, conversation, provider_msg_id)). The cursor starts empty: Connect's start in the job's direction. */
+export function createBackfill(db: Db, source: string, f: { since: number; until: number; maxMessages: number; anchor: string | null; anchorAt: number }, now: number): Row {
   const id = `job_${ulid(now)}`;
   db.prepare(
-    `INSERT INTO obs_jobs (id, source_id, kind, state, since_at, until_at, max_messages, created_at, updated_at) VALUES (?, ?, 'backfill', 'queued', ?, ?, ?, ?, ?)`,
-  ).run(id, source, f.since, f.until, f.maxMessages, now, now);
+    `INSERT INTO obs_jobs (id, source_id, kind, state, since_at, until_at, max_messages, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'backfill', 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, source, f.since, f.until, f.maxMessages, f.anchor, f.anchorAt, now, now);
   const row = jobRow(db, id);
   if (!row) throw notFound("job");
   return row;

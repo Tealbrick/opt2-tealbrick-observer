@@ -1,9 +1,10 @@
-// Owner ops on sources and jobs, and the Connect-dependent ops (connect_unavailable until Connect offers data_pull).
+// Owner ops on sources and jobs, and the Connect-dependent ops (connect_unavailable while Connect cannot be reached).
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { definition, handlers, setClock } from "../src/app.ts";
-import { CONNECT_UNAVAILABLE_MESSAGE, type ConnectPort, setConnectFactory } from "../src/connect.ts";
+import { CONNECT_UNAVAILABLE_MESSAGE, type ConnectPort, connectReachable, setConnectFactory } from "../src/connect.ts";
+import { manifest } from "../src/manifest.ts";
 import { ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
 import { seedDelivery, seedJob, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
@@ -58,10 +59,20 @@ describe("Connect-dependent ops without Connect (R3 missing)", () => {
     assert.equal(count(db, "obs_sources"), 1);
     assert.equal(count(db, "obs_jobs"), 0);
   });
-  it("a slice that names Connect is not enough while the manifest has no Connect companion (both gates must hold)", async () => {
-    const ctx = O({ targets: ["connect", "knowledge"] });
-    assert.deepEqual(await run("sources_available", {}, ctx), { accounts: [], connectMissing: true, targets: ["connect", "knowledge"] });
-    await rejects(run("source_add", { account: "a", conversations: ["c"], label: "x" }, ctx), "connect_unavailable", 409);
+  it("both gates must hold: a sane Connect companion in the manifest AND a slice that lets Observer call Connect", async () => {
+    const withConnect = O({ targets: ["connect", "knowledge"] });
+    const without = O({ targets: ["knowledge"] });
+    assert.equal(connectReachable(withConnect, manifest), true, "quiet on good: the real manifest and a slice naming Connect");
+    assert.equal(connectReachable(without, manifest), false, "the slice does not name Connect");
+    assert.equal(connectReachable(O(), manifest), false, "an SDK too old to say");
+    const noCompanion = { ...manifest, companions: (manifest.companions ?? []).filter((c) => c.product !== "connect") };
+    assert.equal(connectReachable(withConnect, noCompanion), false, "the manifest has no Connect companion");
+    const widened = { ...manifest, companions: (manifest.companions ?? []).map((c) => (c.product === "connect" ? { ...c, operations: [...c.operations, "send_message"] } : c)) };
+    assert.equal(connectReachable(withConnect, widened), false, "a Connect companion that could send is never used");
+    // the slice names Connect but the context cannot call apps (no callApp): still unavailable, nothing made
+    assert.deepEqual(await run("sources_available", {}, withConnect), { accounts: [], connectMissing: true, targets: ["connect", "knowledge"] });
+    await rejects(run("source_add", { account: "a", conversations: ["c"], label: "x" }, without), "connect_unavailable", 409);
+    assert.equal(count(db, "obs_sources"), 0);
   });
 });
 
@@ -69,12 +80,16 @@ describe("Connect-dependent ops without Connect (R3 missing)", () => {
 const FAKE: ConnectPort = {
   async accounts() {
     return [
-      { id: "acc_gmail_1", kind: "gmail", label: "work@example.com", historyCapable: true, conversations: [{ id: "inbox", title: "Inbox", estimate: 1200 }, { id: "projects", title: "Projects", estimate: 80 }] },
-      { id: "acc_tg_1", kind: "telegram", label: "bot", historyCapable: false, conversations: [{ id: "grp1", title: "Team", estimate: null }] },
+      { id: "acc_gmail_1", kind: "gmail", label: "work@example.com", historyCapable: true, retentionDays: null, conversations: [{ id: "inbox", title: "Inbox", estimate: 1200 }, { id: "projects", title: "Projects", estimate: 80 }] },
+      { id: "acc_tg_1", kind: "telegram", label: "bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "grp1", title: "Team", estimate: null }] },
     ];
   },
   async estimate(q) {
     return { messages: q.conversations.length * 100, records: q.conversations.length * 10, durationS: 60, providerNote: null };
+  },
+  // the anchor read of source_add / backfill_start (the job ticks are tested against the fake Connect in ingest-jobs.test.ts)
+  async pull() {
+    return { rows: [], invalid: 0, quarantined: 0, nextCursor: null, anchor: "anchor_1", exhausted: true, retryAfterS: null };
   },
 };
 
@@ -95,8 +110,8 @@ describe("with a Connect port (the S2 path)", () => {
       { label: out.source.label, kind: out.source.kind, account: out.source.account, conversations: out.source.conversations, live: out.source.live, history: out.source.history },
       { label: "Work mail", kind: "gmail", account: "acc_gmail_1", conversations: ["inbox", "projects"], live: { state: "paused", lastReadAt: null, nextAt: null }, history: { state: "none", done: 0, total: null, since: null } },
     );
-    const job = db.prepare("SELECT kind, state, paused_by FROM obs_jobs WHERE source_id = ?").all(out.source.id).map((r) => ({ ...r }));
-    assert.deepEqual(job, [{ kind: "live", state: "paused", paused_by: null }]);
+    const job = db.prepare("SELECT kind, state, paused_by, cursor, anchor, anchor_at FROM obs_jobs WHERE source_id = ?").all(out.source.id).map((r) => ({ ...r }));
+    assert.deepEqual(job, [{ kind: "live", state: "paused", paused_by: null, cursor: "anchor_1", anchor: "anchor_1", anchor_at: now }], "the live job starts at the anchor");
     const row = db.prepare("SELECT live_interval_s, exclude_json, history_capable FROM obs_sources WHERE id = ?").get(out.source.id);
     assert.deepEqual([row?.live_interval_s, row?.exclude_json, row?.history_capable], [120, '{"senders":[],"domains":["spam.example"]}', 1]);
   });
@@ -123,16 +138,23 @@ describe("with a Connect port (the S2 path)", () => {
     const b = await run("backfill_start", { source: src, since: "2026-01-01T00:00:00Z", maxMessages: 500 }, O());
     assert.equal(db.prepare("SELECT max_messages AS m FROM obs_jobs WHERE id = ?").get(b.job.id)?.m, 500);
   });
-  it("backfill_start refuses: more than 3 years back, a live-only source, a second active history job, a bad range", async () => {
+  it("backfill_start refuses: more than 3 years back, a second active history job, a bad range, a start in the future", async () => {
     const src = seedSource(db);
     await run("backfill_start", { source: src, since: "2023-10-17T12:00:00Z" }, O()); // exactly 3 years: fine
     await rejects(run("backfill_start", { source: src, since: "2023-10-17T11:59:59Z" }, O()), "since_too_old", 400);
     await rejects(run("backfill_start", { source: src, since: "2026-01-01T00:00:00Z" }, O()), "backfill_active", 409);
-    const tg = seedSource(db, { kind: "telegram", historyCapable: false });
-    await rejects(run("backfill_start", { source: tg, since: "2026-01-01T00:00:00Z" }, O()), "history_unsupported", 409);
     const other = seedSource(db);
     await rejects(run("backfill_start", { source: other, since: "2026-01-01T00:00:00Z", until: "2026-01-01T00:00:00Z" }, O()), "range_invalid", 400);
+    await rejects(run("backfill_start", { source: other, since: "2026-10-18T00:00:00Z" }, O()), "range_invalid", 400);
     assert.equal(count(db, "obs_jobs"), 1);
+  });
+  it("a source without history (Telegram, Connect 0.6.0) still reads what Connect kept: the job ends at the anchor time", async () => {
+    const tg = seedSource(db, { kind: "telegram", historyCapable: false, account: "acc_tg_1", conversations: ["grp1"] });
+    const out = await run("backfill_start", { source: tg, since: "2026-10-01T00:00:00Z", until: "2026-12-01T00:00:00Z" }, O());
+    assert.deepEqual(
+      { ...db.prepare("SELECT kind, state, cursor, anchor, anchor_at, since_at, until_at FROM obs_jobs WHERE id = ?").get(out.job.id) },
+      { kind: "backfill", state: "queued", cursor: null, anchor: "anchor_1", anchor_at: now, since_at: Date.UTC(2026, 9, 1), until_at: now },
+    );
   });
 });
 
@@ -152,7 +174,7 @@ describe("sources_list, source_get", () => {
         [live, "live", "paused"],
       ],
     );
-    assert.deepEqual(got.jobs[0].counts, { read: 42, records: 4, failures: 5 });
+    assert.deepEqual(got.jobs[0].counts, { read: 42, records: 4, failures: 5, skipped: 0 });
     assert.equal(got.jobs[0].lastError, "rate_limited");
   });
   it("source_get answers not_found for a missing source", async () => {
@@ -175,6 +197,7 @@ describe("source_update", () => {
     );
   });
   it("widening or leaving the conversations alone deletes nothing", async () => {
+    setConnectFactory(() => FAKE);
     const src = seedSource(db, { conversations: ["inbox"] });
     seedMessage(db, src, { conversation: "inbox", id: "m1" });
     await run("source_update", { id: src, conversations: ["inbox", "projects"] }, O());
@@ -267,13 +290,27 @@ describe("source_update", () => {
     const rec = seedRecord(db, src, { state: "approved" });
     seedMessage(db, src, { id: "h1", conversation: "hr", record: rec, text: "HR-PRIVATE" });
     seedDelivery(db, rec, { status: "pending" });
-    await run("source_update", { id: src, conversations: ["inbox", "hr", "ops"] }, O());
+    setConnectFactory(() => FAKE);
+    await run("source_update", { id: src, conversations: ["inbox", "hr", "projects"] }, O());
+    setConnectFactory(null);
     await run("source_update", { id: src, label: "Same" }, O());
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 1);
     await run("source_update", { id: src, conversations: ["inbox"] }, O());
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_deliveries").get()?.c, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_records").get()?.c, 0);
     assert.equal(db.prepare("SELECT COUNT(*) AS c FROM obs_messages").get()?.c, 0);
+  });
+  it("widening checks the new ids against Connect's catalog; without Connect only narrowing works", async () => {
+    const src = seedSource(db, { conversations: ["inbox"] });
+    await rejects(run("source_update", { id: src, conversations: ["inbox", "projects"] }, O()), "connect_unavailable", 409);
+    setConnectFactory(() => FAKE);
+    await rejects(run("source_update", { id: src, conversations: ["inbox", "secret-board"] }, O()), "conversation_unknown", 400);
+    const lost = seedSource(db, { account: "acc_gone", conversations: ["inbox"] });
+    await rejects(run("source_update", { id: lost, conversations: ["inbox", "projects"] }, O()), "account_not_shared", 404);
+    assert.equal(db.prepare("SELECT conversations_json AS c FROM obs_sources WHERE id = ?").get(src)?.c, '["inbox"]', "nothing changed");
+    assert.deepEqual((await run("source_update", { id: src, conversations: ["inbox", "projects"] }, O())).source.conversations, ["inbox", "projects"], "quiet on good");
+    setConnectFactory(null);
+    assert.deepEqual((await run("source_update", { id: src, conversations: ["projects"] }, O())).source.conversations, ["projects"], "narrowing needs no Connect");
   });
   it("refuses an empty conversation list (conversations_empty, 400) and changes nothing", async () => {
     const src = seedSource(db, { conversations: ["inbox"] });
