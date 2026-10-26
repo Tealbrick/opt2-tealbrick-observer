@@ -279,6 +279,7 @@ export const CLASS_NAMES: Record<string, string> = {
   card: "payment card",
   id: "personal id",
   address: "address",
+  name: "person name",
   special: "special category",
 };
 export const classLabel = (c: string): string => CLASS_NAMES[c] ?? c;
@@ -292,12 +293,13 @@ export const REDACTION_LABELS: Record<string, string> = {
   card: "[card]",
   id: "[id]",
   address: "[address]",
+  name: "[name]",
   special: "[special category]",
 };
 /** Classes the owner would call sensitive (a brick tag); contact data gets a quiet one. */
 export const SENSITIVE = new Set(["secret", "suspect_secret", "iban", "card", "id", "special"]);
 /** The PII classes a routing rule can ask for. */
-export const PII_CHOICES = ["email", "phone", "iban", "card", "id", "address", "special"] as const;
+export const PII_CHOICES = ["email", "phone", "iban", "card", "id", "address", "name", "special"] as const;
 
 /** The title of a record: its thread subject, else the source it came from. */
 export const recordTitle = (r: Pick<RecordSummary, "thread">, sourceLabel: string | undefined): string => (r.thread?.trim() ? r.thread.trim() : `Messages in ${sourceLabel ?? "a source"}`);

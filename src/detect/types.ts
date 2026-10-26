@@ -1,7 +1,7 @@
 // Detector contract (DESIGN §5.3): every detector is a pure function text → Detection. No I/O, no clock, no state.
 // Spans are [start, end) offsets in UTF-16 code units of the text that was given (the same offsets JS string methods use).
 // Detections hold offsets and classes ONLY: never the matched value.
-export type PiiClass = "email" | "phone" | "iban" | "card" | "id" | "address" | "special";
+export type PiiClass = "email" | "phone" | "iban" | "card" | "id" | "address" | "name" | "special";
 export type DetectClass = "secret" | "suspect_secret" | PiiClass;
 export interface Span {
   start: number;
@@ -14,7 +14,7 @@ export interface Detection {
 }
 export type Detector = (text: string) => Detection;
 
-export const PII_CLASSES: readonly PiiClass[] = ["email", "phone", "iban", "card", "id", "address", "special"];
+export const PII_CLASSES: readonly PiiClass[] = ["email", "phone", "iban", "card", "id", "address", "name", "special"];
 export const isPiiClass = (c: string): c is PiiClass => (PII_CLASSES as readonly string[]).includes(c);
 
 export function detection(cls: DetectClass, spans: Span[]): Detection {

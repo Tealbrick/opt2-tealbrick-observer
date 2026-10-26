@@ -4,6 +4,7 @@ import { detectCards } from "./card.ts";
 import { detectEmails } from "./email.ts";
 import { DEFAULT_GOV_COUNTRIES, detectGovIds } from "./govid.ts";
 import { detectIbans } from "./iban.ts";
+import { detectNames } from "./name.ts";
 import { mapBack, normalize } from "./normalize.ts";
 import { detectPhones } from "./phone.ts";
 import { detectSecrets } from "./secret.ts";
@@ -32,6 +33,7 @@ export function detectAll(text: string, cfg: DetectConfig = {}): Detection[] {
     back(detectCards(t)),
     back(detectGovIds(t, cfg.govCountries ?? DEFAULT_GOV_COUNTRIES)),
     back(detectAddresses(t)),
+    back(detectNames(t)),
     back(detectSpecial(t)),
     back(detectSuspect(t)),
   ];

@@ -10,6 +10,7 @@ import { detectEmails } from "../src/detect/email.ts";
 import { detectGovIds, steuerIdValid } from "../src/detect/govid.ts";
 import { detectIbans, domesticAccountValid, IBAN_LENGTH, mod97 } from "../src/detect/iban.ts";
 import { detectAll, redactText } from "../src/detect/index.ts";
+import { detectNames } from "../src/detect/name.ts";
 import { detectPhones, splitCallingCode } from "../src/detect/phone.ts";
 import { detectSecrets, shannonEntropy } from "../src/detect/secret.ts";
 import { detectSpecial } from "../src/detect/special.ts";
@@ -414,6 +415,67 @@ describe("government ids", () => {
     assert.equal(detectGovIds(text, ["SK", "CZ"]).count, 1, "SK and CZ share the format: found once");
     assert.equal(detectGovIds(text, []).count, 0);
     assert.equal(detectGovIds(text, ["XX"]).count, 0, "an unknown country is ignored");
+  });
+});
+
+// Synthetic names only (invented people, the German sample names Erika Mustermann / Max Mustermann, the Czech sample name Jan Novák).
+describe("names", () => {
+  it("fires on a known given name and the capitalised words after it (EN, SK/CZ, DE)", () => {
+    fires(detectNames, [
+      ["Hello, this is Jana Testová from Example Ltd.", ["Jana Testová"]],
+      ["Peter Example told me about it.", ["Peter Example"]],
+      ["Ask Erika Mustermann in Berlin.", ["Erika Mustermann"]],
+      ["Zavolaj Jánovi, Ján Novák to vie.", ["Ján Novák"]],
+      ["Mia sent it yesterday.", ["Mia"]],
+      ["Anna-Lena Beispiel und Max Mustermann kommen.", ["Anna-Lena Beispiel", "Max Mustermann"]],
+    ]);
+  });
+  it("fires on any capitalised word after a title or a greeting, but not on the title or greeting itself", () => {
+    fires(detectNames, [
+      ["Sehr geehrte Frau Musterfrau,", ["Musterfrau"]],
+      ["Dobrý deň, pán Novák, posielam faktúru.", ["Novák"]],
+      ["Dear Mr. Example, thank you.", ["Example"]],
+      ["Ahoj Zuzka, vďaka!", ["Zuzka"]],
+      ["Liebe Kerstin, danke.", ["Kerstin"]],
+    ]);
+  });
+  it("fires on the writer's name after a sign-off, on the next line or after the comma", () => {
+    fires(detectNames, [
+      ["Thanks,\nAlex", ["Alex"]],
+      ["Best regards, Jan Novák", ["Jan Novák"]],
+      ["S pozdravom\r\nZuzana Príkladová\r\n", ["Zuzana Príkladová"]],
+      ["Viele Grüße\nBernadette Beispiel", ["Bernadette Beispiel"]],
+    ]);
+  });
+  it("is quiet on given names that are also words, without a surname or cue; on months, days, teams, capital nouns and email addresses", () => {
+    quiet(
+      detectNames,
+      [
+        "Will you mark the bill in May?",
+        "Grace period ends Friday.",
+        "Die Rechnung kommt am Montag.",
+        "Hello Team, the Q4 Summary is ready.",
+        "Hi, Hope you are well.",
+        "Liebe Grüße\nDein Team",
+        "Write to anna.testova@example.com or Anna.Testova@example.com today.",
+        "See https://example.com/Peter/Page for it.",
+        "JANA NOVAKOVA called.",
+        "Can you send the Q4 summary to the team by Friday?",
+        "Hallo zusammen, Danke für alles.",
+      ],
+      "Hi Anna, can you send it?",
+    );
+  });
+  it("a name is personal data: detectAll reports it, and redaction writes [name]", () => {
+    const text = "Peter Example: call me";
+    assert.ok(detectAll(text).some((d) => d.class === "name"));
+    assert.equal(redactText(text, detectAll(text)), "[name]: call me");
+  });
+  it("stays linear: a 64 KiB text of capitalised words classifies quickly", () => {
+    const text = rep("Anna Beispiel Example Word ", 2500);
+    const t0 = performance.now();
+    detectNames(text);
+    assert.ok(performance.now() - t0 < 1000);
   });
 });
 
