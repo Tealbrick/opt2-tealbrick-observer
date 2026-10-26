@@ -52,6 +52,7 @@ describe("Sources", () => {
     const text = m.host.textContent ?? "";
     assert.match(text, /Observer needs Connect and Knowledge to work\./);
     assert.match(text, /Knowledge is not available to it now\./);
+    assert.match(text, /To connect Knowledge: in Portal, add Knowledge to this workspace and give it a licence\./, "the next step for Knowledge");
     assert.doesNotMatch(text, /Connect is not available/);
     await m.unmount();
   });

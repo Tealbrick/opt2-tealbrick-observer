@@ -7,7 +7,7 @@ import { Check, ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useA
 import { actionPhrase, matchPhrase } from "./rules.ts";
 
 /** Which class names a merged span when marks overlap: first wins (src/detect/redact.ts PRIORITY). */
-const PRIORITY = ["secret", "suspect_secret", "iban", "card", "id", "email", "phone", "address", "special"];
+const PRIORITY = ["secret", "suspect_secret", "iban", "card", "id", "email", "phone", "name", "address", "special"];
 
 interface Piece {
   text: string;
@@ -162,7 +162,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
         <dt>Route</dt>
         <dd>{r.possibleSecret ? "Held for your review, whatever the rules say" : rule ? `Rule ${rule.position}: ${matchPhrase(rule.match, sourceLabels)} → ${actionPhrase(rule.action)}` : "No rule matched"}</dd>
         <dt>Found</dt>
-        <dd>{found.length === 0 ? "No personal data" : found.map(([c, n]) => `${classLabel(c)} (${n})`).join(", ")}</dd>
+        <dd>{found.length === 0 ? "Observer found no personal data (it checks names, contact details, bank and card numbers, ids, addresses and special categories)" : found.map(([c, n]) => `${classLabel(c)} (${n})`).join(", ")}</dd>
         <dt>Messages</dt>
         <dd>
           {r.messages.length}

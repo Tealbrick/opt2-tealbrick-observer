@@ -121,6 +121,7 @@ describe("Review", () => {
     stub.targets = [];
     const none = await mountReview();
     assert.match(none.host.textContent ?? "", /Observer needs Connect and Knowledge to work\. Connect and Knowledge are not available to it now\. Task Board/);
+    assert.match(none.host.textContent ?? "", /only when Connect offers shared data access, in a later Connect version\. You need to do nothing now\./, "the Connect step");
     assert.match(detail(none.host).textContent ?? "", /Knowledge is not available to Observer, so nothing can be delivered now\. You can still drop the record\./);
     assert.ok(control(detail(none.host), "Deliver redacted").disabled);
     assert.ok(!control(detail(none.host), "Drop").disabled);

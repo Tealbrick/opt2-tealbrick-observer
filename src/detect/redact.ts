@@ -11,10 +11,11 @@ export const LABELS: Readonly<Record<DetectClass, string>> = {
   card: "[card]",
   id: "[id]",
   address: "[address]",
+  name: "[name]",
   special: "[special category]",
 };
 /** Which label a merged span gets when classes overlap: first in this list wins. */
-export const PRIORITY: readonly DetectClass[] = ["secret", "suspect_secret", "iban", "card", "id", "email", "phone", "address", "special"];
+export const PRIORITY: readonly DetectClass[] = ["secret", "suspect_secret", "iban", "card", "id", "email", "phone", "name", "address", "special"];
 
 export interface ClassedSpan extends Span {
   class: DetectClass;

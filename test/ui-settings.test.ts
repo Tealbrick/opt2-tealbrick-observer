@@ -38,7 +38,8 @@ describe("Settings", () => {
     assert.ok(![...m.host.querySelectorAll(".ob-apps li")][2]?.querySelectorAll(".tb-tag")[1]?.className.includes("needs-you"));
     const missing = m.host.querySelector(".tb-notice.needs-you")?.textContent ?? "";
     assert.match(missing, /Observer needs Connect and Knowledge to work\. Knowledge is not available to it now\./);
-    assert.doesNotMatch(missing, /Portal/, "no Portal hint until Observer declares a Connect companion");
+    assert.doesNotMatch(missing, /Portal[^.]*Connect|Connect[^.]*Portal/, "no Portal hint for Connect until Observer declares a Connect companion");
+    assert.match(missing, /To connect Knowledge: in Portal, add Knowledge to this workspace and give it a licence\./, "a missing Knowledge gets its next step");
     assert.match(m.host.textContent ?? "", /Observer cannot read sources yet\. Sources start when Connect gives Observer data access\./);
     await m.unmount();
   });

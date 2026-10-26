@@ -2,6 +2,12 @@
 
 All notable changes to Observer. One section per released version (handbook §3.2).
 
+## 0.1.1 (2026-10-26)
+**Observer still cannot read sources.** It needs Connect's shared read access (`data_*` ops, R3), which Connect does not offer yet; on any workspace, also PROD, `source_add` and the backfill ops answer `connect_unavailable` (409) and no delivery is sent (S4). This release makes the detectors and the pages ready for that day.
+- New detector `name` (person names, EN / SK / CZ / DE; medium to low confidence, deterministic, no model): a known given name and the capitalised words after it, any capitalised word after a courtesy title (Mr, pán, Frau) or a greeting (Dear, Ahoj, Liebe), and a short line after a sign-off (Thanks, S pozdravom, Viele Grüße). Given names that are also common words (Will, May, Frank) need a surname or a cue. Words inside email addresses and URLs are left to the email detector. Given-name lists: `src/detect/names-data.ts` (provenance in its header). A name is personal data: the record waits in Review unless a rule delivers it redacted (`[name]`). Routing rules can ask for it. Refs: C169
+- Review says "Observer found no personal data (it checks …)" only when every detector, names included, found nothing. Refs: C169
+- The "not available" notice now gives the next step: for Knowledge, add it to the workspace and give it a licence in Portal (Core grants a companion only to a deployed and licensed app); for Connect, nothing to do until Connect offers data access. Refs: C169
+
 ## 0.1.0 (2026-10-26)
 First release, dev channel only. Observer cannot read sources yet: it needs Connect's shared read access (`data_*` ops, R3), so `source_add` and the backfill ops answer `connect_unavailable` (409), and no delivery is sent (S4). Refs: C169
 - Scaffold from create-tealbrick-miniapp (template ci-v9.10); pins miniapp-sdk 0.1.25, manifest 0.1.18, conformance 0.1.18, ui 0.2.4. Refs: C160, C169, C190

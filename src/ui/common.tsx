@@ -115,7 +115,8 @@ export function ConfirmButton({ label, confirmLabel, onConfirm, disabled, size =
   );
 }
 
-/** Observer needs Connect (to read) and Knowledge (to deliver). Says so when one is missing; renders nothing when both are there. */
+/** Observer needs Connect (to read) and Knowledge (to deliver). Says so when one is missing, with the next step for each; renders nothing
+ *  when both are there. Core grants a companion only to a deployed AND licensed app, so "not available" is one of those two. */
 export function RequiredApps({ targets }: { targets: readonly string[] | null }) {
   if (targets === null) return null;
   const missing = missingRequired(targets);
@@ -124,6 +125,8 @@ export function RequiredApps({ targets }: { targets: readonly string[] | null })
     <Notice tone="needs-you" role="status">
       <span>
         <strong>Observer needs Connect and Knowledge to work.</strong> {missing.join(" and ")} {missing.length === 1 ? "is" : "are"} not available to it now. Task Board and Operator Inbox are optional.
+        {missing.includes("Knowledge") ? " To connect Knowledge: in Portal, add Knowledge to this workspace and give it a licence. Observer connects to it by itself." : ""}
+        {missing.includes("Connect") ? " Connect: Observer can read sources only when Connect offers shared data access, in a later Connect version. You need to do nothing now." : ""}
       </span>
     </Notice>
   );
