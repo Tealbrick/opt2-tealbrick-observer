@@ -2,7 +2,7 @@
 
 All notable changes to Observer. One section per released version (handbook §3.2).
 
-## Unreleased
+## 0.2.0 (2026-10-27; C373 second brain)
 **Observer reads sources and delivers to Knowledge** (C373 second brain). Refs: C169, C230, C322(6), C373
 - S2 ingest (from the unfinished branch `wip/obs-s2-round3`, finished): Connect companion (`data_accounts_list`, `data_catalog`, `data_pull`, crud `["read"]`); the Connect port over `ctx.callApp`; messages/1 checked per row; ingest jobs `obs.live` / `obs.backfill` on the SDK runner (anchor first, one page = one transaction, cursor stored, `retryAfterS` honoured, backoff, 5 failures → failed + attention); a read Connect holds waits for Try again (no automatic recheck); history reads of what Connect kept.
 - Documents sources (contract documents/1, spec main `0bd02e9`, reserved 0.1.83, vendored byte copy): `source_add` takes `dataset: "documents"` and collections; one record per document (text cleaned of control, bidi and zero-width characters, chunked under the 16 KiB message cap, one record); dedupe on (account, collection, id) (one collection per source, `rev` equality, `updatedAt` order, later row wins on a tie); a new revision retires the old record; `deleted: true` follows privacy `onSourceDelete`; rule 0, excluded authors and PII review work as for messages (a document may have no author). `backfill_start` answers `history_not_needed` for documents; `backfill_estimate` counts documents. Migrations 0003-0005.
