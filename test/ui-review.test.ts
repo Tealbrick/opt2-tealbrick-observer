@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { useState } from "react";
-import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, detailOf, flush, h, lastCall, looksLikeKey, mount, REC_BANK, REC_KEY, reset, stub, within } from "./ui-harness.ts";
+import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, detailOf, flush, h, lastCall, looksLikeKey, mount, REC_BANK, REC_KEY, REC_UNSORTED, reset, stub, within } from "./ui-harness.ts";
 
 const ui = compileUi("review");
 type Review = typeof import("../src/ui/review.tsx");
@@ -142,6 +142,33 @@ describe("Review", () => {
     await click(control(d, "Hide the original text"));
     assert.ok(!(d.textContent ?? "").includes(looksLikeKey()));
     await m.unmount();
+  });
+
+  it("a record Observer could not sort says so in its own words (no possible-secret badge or banner); its text opens hidden", async () => {
+    reset();
+    stub.review = [...stub.review, REC_UNSORTED];
+    const m = await mountReview("rec_unsorted");
+    const d = detail(m.host);
+    assert.match(d.textContent ?? "", /Observer could not sort this record\. It is held for you\. Its text opens hidden\./);
+    assert.ok(!/Possible secret: held/.test(d.textContent ?? "") && ![...d.querySelectorAll(".tb-tag")].some((t) => /possible secret/i.test(t.textContent ?? "")), "no possible-secret banner or badge");
+    assert.ok(!(d.textContent ?? "").includes("[possible secret]"), "not hidden behind the possible-secret label");
+    const row = rows(m.host).find((a) => a.getAttribute("href")?.endsWith("rec_unsorted"));
+    assert.deepEqual([...(row?.querySelectorAll(".tb-tag") ?? [])].map((t) => t.textContent), ["could not sort"]);
+    assert.ok(!(d.textContent ?? "").includes("call the clinic"), "the text opens hidden");
+    assert.match(d.textContent ?? "", /\[text hidden\]/);
+    assert.ok(control(d, "Deliver").disabled, "deliver as is needs the text shown and the tick");
+    await click(control(d, "Show the original text"));
+    assert.ok((d.textContent ?? "").includes("call the clinic"));
+    await click(d.querySelector('input[type="checkbox"]') as Element);
+    await click(control(d, "Deliver"));
+    await flush();
+    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_unsorted", revision: 1, decision: "deliver", destination: "knowledge", acknowledged: true });
+    // quiet on good: a real possible secret keeps its own wording
+    await m.unmount();
+    const k = await mountReview("rec_key");
+    assert.match(detail(k.host).textContent ?? "", /Possible secret: held for your review\./);
+    assert.ok(!(detail(k.host).textContent ?? "").includes("could not sort"));
+    await k.unmount();
   });
 
   it("Deliver redacted of a possible secret needs no tick and sends no acknowledgement", async () => {

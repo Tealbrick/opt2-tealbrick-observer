@@ -6,8 +6,10 @@ import { beforeEach, describe, it } from "node:test";
 import { validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { Db, OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { handlers, manifest, setClock } from "../src/app.ts";
-import { setConnectFactory } from "../src/connect.ts";
-import { AGENT_A, ctxFor, migratedDb, OWNER, start } from "./helpers.ts";
+import { realPort, setConnectFactory } from "../src/connect.ts";
+import { runTick } from "../src/jobs.ts";
+import { FakeConnect } from "./fake-connect.ts";
+import { AGENT_A, ctxFor, FakeJobs, migratedDb, OWNER, start } from "./helpers.ts";
 import { CONFORMANCE, seedConformance, seedDelivery, seedJob, seedMessage, seedRecord, seedSource } from "./seed.ts";
 
 let db: Db;
@@ -81,15 +83,24 @@ describe("answers match the manifest schemas", () => {
     await call("rule_delete", { id: rule.id });
     await call("source_remove", { id: src });
   });
-  it("the Connect-dependent ops with a fake Connect answer to schema as well", async () => {
-    setConnectFactory(() => ({
-      accounts: async () => [{ id: "acc1", kind: "gmail", label: "Mail", historyCapable: true, conversations: [{ id: "inbox", title: "Inbox", estimate: 5 }] }],
-      estimate: async () => ({ messages: 5, records: 1, durationS: 3, providerNote: null }),
-    }));
-    await call("sources_available", {});
-    const added = await call("source_add", { account: "acc1", conversations: ["inbox"], label: "Mail" });
-    await call("backfill_estimate", { source: added.source.id, since: "2026-01-01T00:00:00Z" });
-    await call("backfill_start", { source: added.source.id, since: "2026-01-01T00:00:00Z", maxMessages: 100 });
+  it("the Connect-dependent ops over the fake Connect (the real port) answer to schema as well, also after the jobs read", async () => {
+    const fake = new FakeConnect();
+    fake.addAccount({ id: "acc1", service: "telegram", label: "Front desk bot", conversations: [{ id: "inbox", name: "Inbox", type: "group" }] });
+    fake.post("acc1", { conversation: "inbox", id: "m1", text: "hello", sentAt: Date.UTC(2026, 9, 17, 11) });
+    const ctx = ctxFor(db, OWNER, { targets: ["connect", "knowledge"], callApp: fake.callApp, jobs: new FakeJobs() });
+    const avail = await call("sources_available", {}, ctx);
+    assert.deepEqual(avail.accounts, [{ id: "acc1", kind: "telegram", label: "Front desk bot" }], "the list: one call, no catalog");
+    const picked = await call("sources_available", { account: "acc1" }, ctx);
+    assert.deepEqual(picked.accounts, [{ id: "acc1", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "inbox", title: "Inbox", estimate: 1 }] }]);
+    const added = await call("source_add", { account: "acc1", conversations: ["inbox"], label: "Mail" }, ctx);
+    const est = await call("backfill_estimate", { source: added.source.id, since: "2026-01-01T00:00:00Z" }, ctx);
+    assert.deepEqual(est, { messages: 1, records: 1, durationS: 1, providerNote: "This source has no older history: Observer reads what Connect kept (up to 30 days)." });
+    const hist = await call("backfill_start", { source: added.source.id, since: "2026-01-01T00:00:00Z", maxMessages: 100 }, ctx);
+    await runTick(hist.job.id, { db, port: realPort({ callApp: fake.callApp as never }), checkpoint: (_s, w) => db.transaction(() => w(db)), paused: () => false });
+    const got = await call("source_get", { id: added.source.id }, ctx);
+    assert.deepEqual([got.source.history.state, got.source.history.done], ["done", 1]);
+    await call("jobs_list", {}, ctx);
+    await call("status", {}, agent());
   });
 });
 

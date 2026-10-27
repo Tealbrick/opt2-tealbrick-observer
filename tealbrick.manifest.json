@@ -367,7 +367,14 @@
       "input": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {}
+        "properties": {
+          "account": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "One account: its conversations, history flag and kept days (one data_catalog call). Without it: the shared accounts only."
+          }
+        }
       },
       "output": {
         "type": "object",
@@ -441,7 +448,9 @@
                 "account",
                 "conversations",
                 "live",
-                "history"
+                "history",
+                "historyCapable",
+                "keptDays"
               ],
               "properties": {
                 "id": {
@@ -559,6 +568,23 @@
                       ]
                     }
                   }
+                },
+                "historyCapable": {
+                  "type": "boolean",
+                  "description": "Connect can page this source further back than what it kept (data_catalog history)."
+                },
+                "keptDays": {
+                  "anyOf": [
+                    {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 3650
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "How many days Connect keeps this account's messages; null when it did not say."
                 }
               }
             }
@@ -610,7 +636,9 @@
               "account",
               "conversations",
               "live",
-              "history"
+              "history",
+              "historyCapable",
+              "keptDays"
             ],
             "properties": {
               "id": {
@@ -728,6 +756,23 @@
                     ]
                   }
                 }
+              },
+              "historyCapable": {
+                "type": "boolean",
+                "description": "Connect can page this source further back than what it kept (data_catalog history)."
+              },
+              "keptDays": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3650
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How many days Connect keeps this account's messages; null when it did not say."
               }
             }
           },
@@ -744,7 +789,9 @@
                 "state",
                 "counts",
                 "lastError",
-                "retryAt"
+                "retryAt",
+                "note",
+                "held"
               ],
               "properties": {
                 "id": {
@@ -796,6 +843,23 @@
                       "type": "null"
                     }
                   ]
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 400
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
                 }
               }
             }
@@ -895,7 +959,9 @@
               "account",
               "conversations",
               "live",
-              "history"
+              "history",
+              "historyCapable",
+              "keptDays"
             ],
             "properties": {
               "id": {
@@ -1013,6 +1079,23 @@
                     ]
                   }
                 }
+              },
+              "historyCapable": {
+                "type": "boolean",
+                "description": "Connect can page this source further back than what it kept (data_catalog history)."
+              },
+              "keptDays": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3650
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How many days Connect keeps this account's messages; null when it did not say."
               }
             }
           }
@@ -1029,7 +1112,7 @@
       "audience": "person",
       "id": "source_update",
       "title": "Change a source",
-      "description": "Change label, exclusions, interval or conversations. Narrowing applies at once.",
+      "description": "Change label, exclusions, interval or conversations. Narrowing applies at once. Messages of the new conversations from before today come only with a history read.",
       "input": {
         "type": "object",
         "additionalProperties": false,
@@ -1117,7 +1200,9 @@
               "account",
               "conversations",
               "live",
-              "history"
+              "history",
+              "historyCapable",
+              "keptDays"
             ],
             "properties": {
               "id": {
@@ -1235,6 +1320,23 @@
                     ]
                   }
                 }
+              },
+              "historyCapable": {
+                "type": "boolean",
+                "description": "Connect can page this source further back than what it kept (data_catalog history)."
+              },
+              "keptDays": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 3650
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "How many days Connect keeps this account's messages; null when it did not say."
               }
             }
           }
@@ -1331,7 +1433,9 @@
                 "state",
                 "counts",
                 "lastError",
-                "retryAt"
+                "retryAt",
+                "note",
+                "held"
               ],
               "properties": {
                 "id": {
@@ -1383,6 +1487,23 @@
                       "type": "null"
                     }
                   ]
+                },
+                "note": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 400
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+                },
+                "held": {
+                  "type": "boolean",
+                  "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
                 }
               }
             }
@@ -1432,7 +1553,9 @@
               "state",
               "counts",
               "lastError",
-              "retryAt"
+              "retryAt",
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1484,6 +1607,23 @@
                     "type": "null"
                   }
                 ]
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 400
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }
@@ -1542,7 +1682,9 @@
               "state",
               "counts",
               "lastError",
-              "retryAt"
+              "retryAt",
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1594,6 +1736,23 @@
                     "type": "null"
                   }
                 ]
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 400
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }
@@ -1736,7 +1895,9 @@
               "state",
               "counts",
               "lastError",
-              "retryAt"
+              "retryAt",
+              "note",
+              "held"
             ],
             "properties": {
               "id": {
@@ -1788,6 +1949,23 @@
                     "type": "null"
                   }
                 ]
+              },
+              "note": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 400
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "A sentence for the owner that is not an error (for example a time span a restarted live job may have missed)."
+              },
+              "held": {
+                "type": "boolean",
+                "description": "Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume)."
               }
             }
           }
@@ -2122,7 +2300,23 @@
             "type": "array",
             "maxItems": 50,
             "items": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "problem": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "routing_failed"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+                }
+              }
             }
           },
           "nextCursor": {
@@ -2174,7 +2368,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },
@@ -2241,7 +2451,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },
@@ -2291,7 +2517,23 @@
             "type": "array",
             "maxItems": 50,
             "items": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "problem": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "enum": [
+                        "routing_failed"
+                      ]
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+                }
+              }
             }
           },
           "nextCursor": {
@@ -2343,7 +2585,23 @@
         ],
         "properties": {
           "record": {
-            "type": "object"
+            "type": "object",
+            "properties": {
+              "problem": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "routing_failed"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "routing_failed: Observer could not sort this record. It is held for the owner and its text opens hidden. It is not a possible secret (possibleSecret says that)."
+              }
+            }
           }
         }
       },
@@ -2609,6 +2867,18 @@
     }
   ],
   "companions": [
+    {
+      "product": "connect",
+      "operations": [
+        "data_accounts_list",
+        "data_catalog",
+        "data_pull"
+      ],
+      "crud": [
+        "read"
+      ],
+      "purpose": "Read the conversations you shared with Observer. Read only: Observer cannot send, edit or delete."
+    },
     {
       "product": "knowledge",
       "operations": [

@@ -3,7 +3,7 @@
 import { Button, Dialog, EmptyState, Notice, Progress, Tag } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 import { AddSource } from "./addsource.tsx";
-import { asAccount, count, dateOf, type Job, kindName, plural, run, type Source, until } from "./api.ts";
+import { asAccount, count, dateOf, type Job, keptSentence, kindName, plural, run, type Source, until } from "./api.ts";
 import { ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useAct, useLoad } from "./common.tsx";
 import { HistoryDialog } from "./history.tsx";
 
@@ -37,8 +37,9 @@ const HISTORY_STATE: Record<string, string> = { queued: "queued", running: "read
 
 function History({ source, job }: { source: Source; job: Job | undefined }) {
   if (!job) {
-    return source.kind === "telegram" ? (
-      <span className="tb-hint">No history: Telegram bots see only messages sent after they join.</span>
+    // what a source can read comes from Connect's catalog (stored at source_add), not from a list of services
+    return source.historyCapable === false ? (
+      <span className="tb-hint">{keptSentence(source.keptDays ?? null)}</span>
     ) : (
       <span className="tb-hint">History is not read. Observer reads only new messages.</span>
     );
@@ -57,7 +58,21 @@ function History({ source, job }: { source: Source; job: Job | undefined }) {
   );
 }
 
-function SourceCard({ source, jobs, busy, onJob, onHistory, onRemove }: { source: Source; jobs: Job[]; busy: boolean; onJob: (job: Job, action: "pause" | "resume" | "cancel" | "start") => void; onHistory: (s: Source) => void; onRemove: (s: Source) => void }) {
+function SourceCard({
+  source,
+  jobs,
+  busy,
+  onJob,
+  onHistory,
+  onRemove,
+}: {
+  source: Source;
+  jobs: Job[];
+  busy: boolean;
+  onJob: (job: Job, action: "pause" | "resume" | "cancel" | "start") => void;
+  onHistory: (s: Source) => void;
+  onRemove: (s: Source) => void;
+}) {
   const live = jobs.find((j) => j.kind === "live");
   const hist = jobs.find((j) => j.kind === "backfill");
   const l = liveStatus(live, source);
@@ -86,6 +101,10 @@ function SourceCard({ source, jobs, busy, onJob, onHistory, onRemove }: { source
         </dd>
       </dl>
       {live?.state === "failed" && live.lastError ? <p className="tb-hint">Last error: {live.lastError}</p> : null}
+      {hist?.state === "failed" && hist.lastError ? <p className="tb-hint">History error: {hist.lastError}</p> : null}
+      {live?.lastError && live.state === "waiting" ? <p className="tb-hint">Live: {live.lastError}</p> : null}
+      {hist?.lastError && hist.state === "waiting" ? <p className="tb-hint">History: {hist.lastError}</p> : null}
+      {live?.note ? <p className="tb-hint">{live.note}</p> : null}
       <div className="tb-ctas">
         {live && ["running", "queued", "waiting"].includes(live.state) ? (
           <Button size="sm" disabled={busy} onClick={() => onJob(live, "pause")}>
@@ -118,7 +137,7 @@ function SourceCard({ source, jobs, busy, onJob, onHistory, onRemove }: { source
           </Button>
         ) : null}
         {hist && ["queued", "running", "waiting", "paused"].includes(hist.state) ? <ConfirmButton label="Stop history" confirmLabel="Confirm: stop history" disabled={busy} onConfirm={() => onJob(hist, "cancel")} /> : null}
-        {(!hist || hist.state === "cancelled" || hist.state === "done") && source.kind !== "telegram" ? (
+        {!hist || hist.state === "cancelled" || hist.state === "done" ? (
           <Button size="sm" disabled={busy} onClick={() => onHistory(source)}>
             Read history…
           </Button>
@@ -197,7 +216,15 @@ export function SourcesPage() {
       ) : (
         <div className="cards">
           {d.sources.map((s) => (
-            <SourceCard key={s.id} source={s} jobs={d.jobs.filter((j) => j.source === s.id)} busy={busy} onJob={(j, a) => void control(j, a)} onHistory={setHistory} onRemove={setRemoving} />
+            <SourceCard
+              key={s.id}
+              source={s}
+              jobs={d.jobs.filter((j) => j.source === s.id)}
+              busy={busy}
+              onJob={(j, a) => void control(j, a)}
+              onHistory={setHistory}
+              onRemove={setRemoving}
+            />
           ))}
         </div>
       )}
