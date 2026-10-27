@@ -52,7 +52,7 @@ import {
 import { now, setClock } from "./clock.ts";
 import { companionTargets, connectPort, connectRefusal, requireConnect, viaConnect } from "./connect.ts";
 import { DOCUMENTS_DATASET, MESSAGES_DATASET } from "./contract.ts";
-import { chosenArea, DELIVER_KIND, defaultArea, deliverJob, deliveryCounts, ensureDrainJob, KNOWLEDGE, KNOWLEDGE_MISSING, knowledgeAreas, setChosenArea } from "./deliver.ts";
+import { chosenArea, DELIVER_KIND, defaultArea, deliverJob, deliveryCounts, ensureDrainJob, HUMAN_EDITED, KNOWLEDGE, KNOWLEDGE_MISSING, knowledgeAreas, setChosenArea } from "./deliver.ts";
 import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
 import { BACKFILL_KIND, DOC_DEFAULT_INTERVAL_S, jobSpec, jobsAttention, jobsOf, LIVE_KIND, reconcileJobs, syncSdkJob } from "./jobs.ts";
@@ -341,6 +341,11 @@ export const handlers = {
         ctx.db
           .prepare("UPDATE obs_sources SET label = ?, conversations_json = ?, exclude_json = ?, live_interval_s = ?, retention_days = ?, updated_at = ? WHERE id = ?")
           .run(label, JSON.stringify(conversations), JSON.stringify(exclude), i.liveIntervalS ?? Number(r.live_interval_s), retention, now(), i.id);
+        // documents: a changed collection list restarts the scan from the start (a mid-scan cursor is cheap to lose, and the new list
+        // may make the old position meaningless)
+        if (r.dataset === DOCUMENTS_DATASET && (conversations.length !== before.length || conversations.some((c) => !before.includes(c)))) {
+          ctx.db.prepare("UPDATE obs_jobs SET cursor = NULL, same_cursor_count = 0, updated_at = ? WHERE source_id = ? AND kind = 'live'").run(now(), i.id);
+        }
         // narrowing applies at once: stored messages the source may no longer hold go now.
         dropOutOfScope(
           ctx.db,
@@ -547,7 +552,13 @@ export const handlers = {
       const r = deliveryRow(ctx.db, i.id);
       if (!r) throw notFound("delivery");
       // the row changes (failed → pending); the outbox drain sends it with the stored key and the stored call
-      const delivery = retryDelivery(ctx.db, r, now());
+      const delivery = ctx.db.transaction(() => {
+        const out = retryDelivery(ctx.db, r, now());
+        // a document a person edited in Knowledge: the owner resets it. The link is forgotten, so the next send makes a NEW document
+        // from this version and the edited one stays as the person left it
+        if (r.last_error === HUMAN_EDITED && r.target_key) ctx.db.prepare("DELETE FROM obs_targets WHERE key = ? AND destination = 'knowledge'").run(String(r.target_key));
+        return out;
+      });
       ensureDrainJob(jobsOf(ctx));
       return { delivery };
     },

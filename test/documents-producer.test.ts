@@ -85,6 +85,7 @@ const owner = (): OpContext => ctxFor(db, OWNER, { targets: ["connect", "knowled
 const tick = (over: Partial<TickDeps> = {}): TickDeps => ({ db, port: realPort({ callApp: callApp as never }, budget), checkpoint: <T>(_s: Json, w: (d: Db) => T) => db.transaction(() => w(db)), paused: () => false, random: () => 0.5, ...over });
 const drain = (over: Partial<DrainDeps> = {}): DrainDeps => ({ db, callApp: callApp as never, targets: () => ["connect", "knowledge"], write: (fn) => db.transaction(() => fn(db)), random: () => 0.5, ...over });
 const one = (sql: string, ...a: unknown[]): Out => ({ ...(db.prepare(sql).get(...a) ?? {}) });
+const all = (sql: string, ...a: unknown[]): Out[] => db.prepare(sql).all(...a).map((r) => ({ ...r }));
 const count = (sql: string, ...a: unknown[]): number => Number(db.prepare(sql).get(...a)?.c ?? 0);
 
 beforeEach(async () => {
@@ -123,7 +124,7 @@ const sendAll = () => drainOutbox(drain());
 const textOf = (source: string, id: string) => one("SELECT text FROM obs_messages WHERE source_id = ? AND provider_msg_id = ?", source, `${id}#0000`).text;
 
 describe("QA-OBS11-1: the documents dataset is a scan; the stored cursor lives only mid-scan", () => {
-  it("an edit to an early document is seen after the first full scan; a source of ONE collection asks for that collection", async () => {
+  it("an edit to an early document is seen after the first full scan; the scan is never filtered by collection", async () => {
     const { source, live } = await addDocs();
     state = [mk("a", "alpha v1"), mk("b", "beta"), mk("c", "gamma"), mk("d", "delta"), mk("e", "eps")];
     await runTick(live, tick());
@@ -132,9 +133,9 @@ describe("QA-OBS11-1: the documents dataset is a scan; the stored cursor lives o
     assert.deepEqual(
       pulls.map((p) => [p.cursor === undefined ? "start" : offsetOf(p.cursor), p.collection]),
       [
-        ["start", "finance"],
-        [2, "finance"],
-        [4, "finance"],
+        ["start", undefined],
+        [2, undefined],
+        [4, undefined],
       ],
     );
     now += SCAN;
@@ -424,7 +425,7 @@ describe("QA-OBS11-8, -9: untrusted documents, human edits, one Knowledge docume
     const d = one("SELECT status, last_error, payload_json FROM obs_deliveries WHERE superseded = 0 ORDER BY created_at DESC, id DESC LIMIT 1");
     assert.deepEqual([d.status, d.last_error, d.payload_json], ["failed", HUMAN_EDITED, null]);
     const view = await run("deliveries_list", {}, owner());
-    assert.ok(JSON.stringify(view).includes("A person changed this document"), "Activity shows the sentence");
+    assert.ok(JSON.stringify(view).includes("Edited in Knowledge"), "Activity shows the sentence");
   });
   it("a revision that arrives while the first create is unanswered settles that create first: ONE Knowledge document", async () => {
     const { live } = await addDocs();
@@ -452,5 +453,61 @@ describe("QA-OBS11-8, -9: untrusted documents, human edits, one Knowledge docume
     assert.equal(knowledge.docs.get("doc_0001")?.body, "v2 text", "the new revision updated the document the first create made");
     assert.equal(knowledge.calls.filter((c) => c.op === "document_update").length, 1);
     assert.equal(count("SELECT COUNT(*) AS c FROM obs_deliveries WHERE payload_json IS NOT NULL"), 0);
+  });
+  it("after a human edit Observer stops updating that document: later revisions keep ONE failed row; Retry makes a new document and leaves the edited one", async () => {
+    const { live } = await addDocs();
+    await rule();
+    state = [mk("a", "v1 text")];
+    await runTick(live, tick());
+    await sendAll();
+    knowledge.humanEdit("doc_0001", "Edited by hand");
+    for (const text of ["v2 text", "v3 text", "v4 text"]) {
+      now += SCAN;
+      change("a", { text });
+      await runTick(live, tick());
+      await sendAll();
+    }
+    assert.equal(knowledge.calls.filter((c) => c.op === "document_update").length, 1, "only the first update was tried; the frozen document gets nothing more");
+    assert.equal(knowledge.docs.get("doc_0001")?.body, "Edited by hand");
+    const failed = all("SELECT id, last_error FROM obs_deliveries WHERE status = 'failed'");
+    assert.equal(failed.length, 1, "ONE Activity row for the document");
+    assert.equal(failed[0]?.last_error, HUMAN_EDITED);
+    assert.match(HUMAN_EDITED, /Edited in Knowledge.*no longer updates it/);
+    assert.ok(one("SELECT frozen_at FROM obs_targets").frozen_at !== null);
+    await run("delivery_retry", { id: failed[0]?.id }, owner());
+    await sendAll();
+    assert.equal(knowledge.docs.size, 2, "a new document from the latest version");
+    assert.equal(knowledge.docs.get("doc_0002")?.body, "v4 text");
+    assert.equal(knowledge.docs.get("doc_0001")?.body, "Edited by hand", "the edited one is as the person left it");
+    assert.equal(one("SELECT frozen_at FROM obs_targets").frozen_at, null);
+  });
+});
+
+describe("QA-OBS11 delta D3: a delivery that failed for good", () => {
+  it("keeps no stored call; Retry builds it again from the record; with the text gone Retry fails plainly with the text-gone sentence", async () => {
+    const { live } = await addDocs();
+    await rule();
+    state = [mk("a", "Board memo: salary budget")];
+    await runTick(live, tick());
+    knowledge.fail("document_create", "scope_denied", 403);
+    await sendAll();
+    const row = one("SELECT id, status, payload_json FROM obs_deliveries");
+    assert.deepEqual([row.status, row.payload_json], ["failed", null]);
+    await run("delivery_retry", { id: row.id }, owner());
+    await sendAll();
+    assert.equal(knowledge.docs.get("doc_0001")?.body, "Board memo: salary budget");
+    // text gone: a new failure, then the retention passes
+    now += SCAN;
+    state = [mk("b", "Second memo")];
+    await runTick(live, tick());
+    knowledge.fail("document_create", "scope_denied", 403);
+    await sendAll();
+    const b = one("SELECT id FROM obs_deliveries WHERE status = 'failed'");
+    db.prepare("UPDATE obs_records SET text_purge_at = ? WHERE id = (SELECT record_id FROM obs_deliveries WHERE id = ?)").run(now - 1, b.id);
+    const callsBefore = knowledge.calls.length;
+    await run("delivery_retry", { id: b.id }, owner());
+    await sendAll();
+    assert.equal(knowledge.calls.length, callsBefore, "nothing is sent");
+    assert.deepEqual([one("SELECT status FROM obs_deliveries WHERE id = ?", b.id).status, one("SELECT last_error FROM obs_deliveries WHERE id = ?", b.id).last_error], ["failed", TEXT_GONE]);
   });
 });

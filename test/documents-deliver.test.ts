@@ -159,7 +159,7 @@ describe("documents ingest: one record per document", () => {
     now += SCAN;
     await runTick(live, tick());
     assert.equal(connect.calls.at(-1)?.input.cursor, undefined);
-    assert.equal(connect.calls.at(-1)?.input.collection, "finance", "a source of ONE collection asks for that collection only");
+    assert.equal(connect.calls.at(-1)?.input.collection, undefined, "the scan is never filtered by collection (tombstones come only on a full scan)");
     assert.equal(count("SELECT COUNT(*) AS c FROM obs_records WHERE source_id = ?", source), 2);
   });
   it("a long document is chunked under the message cap into ONE record, in order (the joined text is the document)", async () => {

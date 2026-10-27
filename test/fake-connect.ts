@@ -16,7 +16,7 @@
 //
 // The documents dataset has two models (`docMode`). `scan` (default) is the producer's (connect feat/c373-documents-dataset): a
 // state SCAN. Each document appears once with its latest state (a source deletion is a tombstone row, deleted: true, with a new
-// rev), in first-seen order; the cursor is the list position (bound to the account and to the `collection` filter); the LAST page
+// rev, and Connect makes tombstones ONLY on a full scan: a pull with a `collection` filter never shows one), in first-seen order; the cursor is the list position (bound to the account and to the `collection` filter); the LAST page
 // answers exhausted: true with nextCursor null, and to see changes a consumer scans again from the start; a 429 on a later page
 // answers rows WITH retryAfterS (`rateLimitWithRows`). `feed` is an append-only change feed that keeps its cursor when exhausted
 // (the way messages behave); Observer does not rely on it for documents, the second mode only proves it still ends right.
@@ -393,7 +393,8 @@ export class FakeConnect {
     const enc2 = (n: number): string => Buffer.from(`scan:${a.id}:${collection ?? ""}:${n}`).toString("base64url");
     const latest = new Map<string, DocLogRow>();
     for (const r of this.docLogs.get(a.id) ?? []) latest.set(`${r.collection}\u0000${r.id}`, r);
-    const all = [...latest.values()].filter((r) => collection === null || r.collection === collection);
+    // tombstones only on the full (unfiltered) scan, as the producer does (a filtered scan cannot know what vanished)
+    const all = [...latest.values()].filter((r) => collection === null || (r.collection === collection && !r.deleted));
     const limit = Math.max(1, Math.min(this.docPageSize, 50, typeof i.limit === "number" ? Math.trunc(i.limit) : 50));
     let page: Record<string, unknown>;
     if (retryAfterS !== null && !withRows) page = { rows: [], nextCursor: cursor, exhausted: false, retryAfterS };

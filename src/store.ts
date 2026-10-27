@@ -859,6 +859,8 @@ export function retryDelivery(db: Db, r: Row, now: number): DeliveryView {
     throw new TbError("delivery_state_invalid", "this delivery does not belong to the owner's last decision on the record; decide the record in Review", 409);
   }
   if (str(r.status) !== "failed") throw new TbError("delivery_state_invalid", `cannot retry a delivery that is ${str(r.status)}`, 409);
+  // a delivery that failed for good keeps no stored call (the whole body): the drain builds it again from the stored record, and
+  // when the text is gone (purged, past the retention) the row fails again at once with the plain TEXT_GONE sentence (deliver.ts)
   const first = r.first_attempt_at === null || r.first_attempt_at === undefined ? null : Number(r.first_attempt_at);
   const stale = first !== null && now - first > SAME_KEY_WINDOW_MS;
   const key = stale ? deliveryKey(str(r.record_id), Number(r.revision), str(r.destination), now) : str(r.idem_key);

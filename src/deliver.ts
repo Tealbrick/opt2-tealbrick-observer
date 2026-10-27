@@ -14,9 +14,12 @@
 //    same bytes), and only then does the new revision update the document it made (no second document)
 //  - document_update carries `expectedVersion` = the Knowledge version of Observer's last write (obs_targets.version): when a person
 //    edited the document in Knowledge since (version_conflict), Observer does NOT overwrite it: the row fails with a plain sentence
-//    (Activity) and the document is left as the person made it
+//    (Activity) and the document is left as the person made it. The target is then FROZEN (obs_targets.frozen_at): later revisions are
+//    not sent either and keep ONE failed row (the latest) with the same sentence; Retry on it forgets the link, so the next send makes
+//    a new document (the edited one stays as it is)
 //  - a document the source deleted (a tombstone) has its Knowledge copy retracted per the privacy setting (obs_retractions): purge
-//    archives it (status archived, body and summary replaced by a notice, tag `source-deleted`), keep adds the tag only
+//    archives it (status archived, body and summary replaced by a notice, tag `source-deleted`), keep adds the tag only. Knowledge keeps
+//    a revision per change, so an archive replaces the CURRENT text only; earlier revisions stay in its history
 //  - area: the rule's area when a rule delivered it and names one, else the owner's pick (Routing page, obs_settings
 //    `delivery_area`), else Knowledge's shared company area (the `shared` area of
 //    `areas_list`; "company" when the list cannot say)
@@ -73,11 +76,11 @@ export const AREA_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 export const ONLY_KNOWLEDGE = "Observer sends only to Knowledge in this version. Decide the record again with Knowledge as the destination.";
 export const KNOWLEDGE_MISSING = "Knowledge is not available to Observer now (add Knowledge to the workspace and give it a licence in Portal). Observer sends when it is.";
 export const TEXT_GONE = "The text of this record is gone (purged or past its retention), so there is nothing to send.";
-export const HUMAN_EDITED = "A person changed this document in Knowledge after Observer last wrote it. Observer does not overwrite their edit, so this version was not sent.";
+export const HUMAN_EDITED = "Edited in Knowledge: a person changed this document after Observer last wrote it. Observer no longer updates it and never overwrites the edit. Press Retry to let Observer make a new document from this version instead; the edited one stays as it is.";
 export const WAITING_EARLIER = "Observer waits for an earlier send of this document to be settled, so that Knowledge gets one document and not two.";
 /** what a document the source deleted keeps in Knowledge when the privacy setting is purge (the document is archived) */
-export const RETRACTED_BODY = "This document was deleted at its source. Observer removed its text from this copy.";
-export const RETRACTED_SUMMARY = "Deleted at its source; Observer removed the text.";
+export const RETRACTED_BODY = "This document was deleted at its source. Observer replaced the current text of this copy with this notice. Earlier revisions stay in the revision history of Knowledge.";
+export const RETRACTED_SUMMARY = "Deleted at its source; Observer replaced the current text.";
 export const SOURCE_DELETED_TAG = "source-deleted";
 
 const str = (v: unknown): string => String(v);
@@ -399,6 +402,13 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
           out.waiting += 1;
           continue;
         }
+        // a person edited that Knowledge document: Observer sends it nothing more (this row is the one Activity row of the document)
+        if (payload.op === "document_update" && isFrozen(d.db, payload.key)) {
+          const key = payload.key;
+          d.write((db) => freezeTarget(db, id, key, Number(row.attempts), at));
+          out.failed += 1;
+          continue;
+        }
         const built = payload;
         d.write((db) =>
           db
@@ -450,7 +460,7 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
       const p = fresh.payload_json === null ? null : (JSON.parse(str(fresh.payload_json)) as Payload);
       // a person edited the document in Knowledge since Observer's last write: their edit stays; this version is not sent
       if (code === "version_conflict" && p?.op === "document_update") {
-        d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(attempts, HUMAN_EDITED, at, id));
+        d.write((db) => freezeTarget(db, id, p.key, attempts, at));
         out.failed += 1;
         continue;
       }
@@ -464,7 +474,8 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
         continue;
       }
       if (isRefusal(e) || attempts >= MAX_DELIVERY_ATTEMPTS) {
-        d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(attempts, deliveryError(code, "final"), at, id));
+        // failed for good: the stored call (the whole body) goes; Retry builds it again from the stored record (or says the text is gone)
+        d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(attempts, deliveryError(code, "final"), at, id));
         out.failed += 1;
       } else {
         d.write((db) => db.prepare("UPDATE obs_deliveries SET attempts = ?, last_error = ?, next_at = ?, updated_at = ? WHERE id = ?").run(attempts, deliveryError(code, "retry"), at + deliveryBackoffMs(attempts, d.random), at, id));
@@ -481,6 +492,16 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
   const retNow = d.db.prepare("SELECT 1 AS x FROM obs_retractions WHERE status = 'pending' AND next_at IS NULL LIMIT 1").get();
   out.nextInMs = pendingNow || retNow ? 0 : n.length === 0 ? null : Math.max(0, Math.min(...n) - clockNow());
   return out;
+}
+
+const isFrozen = (db: Db, key: string): boolean => !!db.prepare("SELECT 1 AS x FROM obs_targets WHERE key = ? AND destination = 'knowledge' AND frozen_at IS NOT NULL").get(key);
+
+/** A person edited the Knowledge document of this key: freeze the link and keep ONE failed row for it, the latest (older failed rows
+ *  of the same document go). The owner's Retry on that row forgets the link (app.ts), so the next send makes a new document. */
+function freezeTarget(db: Db, id: string, key: string, attempts: number, at: number): void {
+  db.prepare("UPDATE obs_targets SET frozen_at = COALESCE(frozen_at, ?) WHERE key = ? AND destination = 'knowledge'").run(at, key);
+  db.prepare("DELETE FROM obs_deliveries WHERE target_key = ? AND id <> ? AND status = 'failed' AND last_error = ?").run(key, id, HUMAN_EDITED);
+  db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, target_key = ?, attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(key, attempts, HUMAN_EDITED, at, id);
 }
 
 /** Is there another delivery whose document_create for this document was sent (built) and has no answer yet? */

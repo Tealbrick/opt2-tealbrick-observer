@@ -7,8 +7,8 @@
 //            Connect's start: that would import what came before the source
 //  documents a state SCAN (documents/1): the job reads pages from the start; the last page answers exhausted with nextCursor null and the
 //            stored cursor then goes back to NULL, so the next run (after the source's interval, at least DOC_MIN_INTERVAL_MS) scans
-//            again from the start (an unchanged `rev` is a cheap skip, documents.ts). The cursor is kept only MID-scan. A source that
-//            reads ONE collection asks Connect for that collection only. Rows that come with `retryAfterS` are stored first, then the
+//            again from the start (an unchanged `rev` is a cheap skip, documents.ts). The cursor is kept only MID-scan. The scan is
+//            never filtered by collection: Connect tombstones a deleted document only on a full scan. Rows that come with `retryAfterS` are stored first, then the
 //            job waits. A deletion arrives as a tombstone row (deleted: true), never as a missing row: there is no sweep
 //  backfill  history false: forward from Connect's start (what Connect kept), `since` .. `until` (= the anchor time at
 //            backfill_start + 5 min); history true: backward from Connect's newest row down to `since`, with the same end.
@@ -38,7 +38,7 @@ import { storeDocument } from "./documents.ts";
 import { storeMessage } from "./ingest.ts";
 import { applyRouting } from "./pipeline.ts";
 import { attachWindow } from "./records.ts";
-import { conversationsOf, jobRow, type Row, recordRow, sourceRow } from "./store.ts";
+import { jobRow, type Row, recordRow, sourceRow } from "./store.ts";
 import { backfillWindows, liveWindows, type WindowMessage } from "./window.ts";
 
 export { CALLS_PER_MINUTE, LIVE_RESERVE } from "./budget.ts";
@@ -339,12 +339,9 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     const docs = src.dataset === DOCUMENTS_DATASET;
     let page: Page | DocPage;
     try {
-      // a source with ONE collection asks for that collection only (the cursor is bound to it); otherwise the whole account is
-      // scanned and the rows of other collections are dropped as out_of_scope
-      const only = docs ? conversationsOf(src) : [];
-      page = docs
-        ? await d.port.pullDocuments({ account: q.account, cursor: q.cursor, ...(only.length === 1 ? { collection: only[0] as string } : {}), limit: Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX), lane: q.lane ?? "live" })
-        : await d.port.pull(q);
+      // documents: the whole account is scanned, NEVER filtered by collection (Connect tombstones a deleted document only on a full
+      // scan); the rows of collections the source did not choose are dropped locally (out_of_scope, not stored)
+      page = docs ? await d.port.pullDocuments({ account: q.account, cursor: q.cursor, limit: Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX), lane: q.lane ?? "live" }) : await d.port.pull(q);
     } catch (e) {
       return fail(d, jobRow(d.db, jobId) ?? job, e, clockNow());
     }

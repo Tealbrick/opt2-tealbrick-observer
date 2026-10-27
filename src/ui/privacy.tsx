@@ -119,7 +119,7 @@ export function PrivacyPage() {
           <article className="tb-card">
             <h3>Deleted in the source</h3>
             <Switch label="Delete Observer’s copy at once" checked={p.onSourceDelete === "purge"} disabled={busy} onCheckedChange={(on) => void change({ onSourceDelete: on ? "purge" : "keep" })} />
-            <p className="tb-hint">A Knowledge document made from it gets the tag “source-deleted” and an item in Operator Inbox. Observer never deletes in Knowledge itself.</p>
+            <p className="tb-hint">A Knowledge document made from it is archived and its current text replaced by a notice, or, if you keep Observer’s copy, gets the tag “source-deleted”. Knowledge keeps a revision history, so earlier text stays there. Observer never deletes in Knowledge itself.</p>
           </article>
           <article className="tb-card">
             <h3>Delete now</h3>
