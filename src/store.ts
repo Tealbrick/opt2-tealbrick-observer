@@ -27,6 +27,8 @@ export type RecordState = (typeof RECORD_STATES)[number];
 export type Destination = "knowledge" | "kanban" | "inbox";
 
 export const iso = (ms: unknown): string | null => (ms === null || ms === undefined ? null : new Date(Number(ms)).toISOString());
+/** "2026-10-17 12:00 UTC" for sentences the owner reads */
+export const humanTime = (ms: number): string => `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 const str = (v: unknown): string => String(v);
 const strOrNull = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -91,9 +93,14 @@ export interface JobView {
   source: string;
   kind: "live" | "backfill";
   state: string;
-  counts: { read: number; records: number; failures: number };
+  /** read = messages stored, skipped = rows that did not conform to messages/1 (never stored) */
+  counts: { read: number; records: number; failures: number; skipped: number };
   lastError: string | null;
   retryAt: string | null;
+  /** Connect holds this job's read for the owner: it waits without rechecks until Try again (job_control resume) */
+  held: boolean;
+  /** a sentence for the owner that is not an error (a restarted live job names the span it may have missed) */
+  note: string | null;
 }
 
 export function jobRow(db: Db, id: string): Row | undefined {
@@ -105,9 +112,11 @@ export function jobView(r: Row): JobView {
     source: str(r.source_id),
     kind: r.kind === "backfill" ? "backfill" : "live",
     state: str(r.state),
-    counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures) },
+    counts: { read: Number(r.read_count), records: Number(r.record_count), failures: Number(r.consecutive_failures), skipped: Number(r.skipped_count ?? 0) },
     lastError: r.last_error === null || r.last_error === undefined ? null : str(r.last_error).slice(0, 280),
     retryAt: iso(r.retry_at),
+    held: str(r.state) === "waiting" && r.error_code === "connect_held",
+    note: r.note === null || r.note === undefined ? null : str(r.note).slice(0, 400),
   };
 }
 export function listJobs(db: Db, source: string | undefined, limit = 200): JobView[] {
@@ -120,17 +129,24 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
 /**
  * The job state machine (obs_jobs.state). Only the owner uses start / resume / cancel; an agent can only pause.
  *   start   : paused, never paused by anyone (paused_by NULL: the state a new live job is created in) → queued
- *   resume  : paused (paused_by set) or failed → queued   (failed: clears the failure count, error and retry time)
+ *   resume  : paused (paused_by set), failed, or waiting on a read Connect holds → queued (clears the failure count, error
+ *             and retry time). After
+ *             `cursor_invalid` a HISTORY job reads again from Connect's start in its direction (messages already stored fall on
+ *             the UNIQUE key); a LIVE job never does that (it would import what came before the source): the handler captures
+ *             a fresh anchor first and passes it as `reanchor`, the job continues from it and its note names the span it may
+ *             have missed. A live job with cursor_invalid cannot resume without a fresh anchor (`reanchor_required`).
  *   pause   : queued | running | waiting → paused, paused_by = the caller; pausing a paused job is a no-op
  *   cancel  : queued | running | waiting | paused | failed → cancelled; cancelling a cancelled job is a no-op
  * `done` and `cancelled` are final. Anything else is `job_state_invalid` (409).
  *
- * TODO(S2): the SDK job runner (R1, `defineApp({ jobs })`, ctx.jobs.{start,pause,resume,cancel}) executes the jobs. When it
- * lands, every transition below also calls the runner for `sdk_job_id`, and the runner (not this table) moves
- * queued → running → waiting/done/failed. S1 keeps obs_jobs consistent on its own; nothing reads from a source yet.
+ * This table is the owner's truth. The SDK job runner (src/jobs.ts, `defineApp({ jobs })`) executes the jobs: after every
+ * transition the handler calls `syncSdkJob`, and each tick reads this state before every pull (a paused or cancelled job never
+ * pulls again). The tick moves queued → running → waiting/done/failed.
  */
-export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number): { row: Row; changed: boolean } {
+export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number, reanchor?: { anchor: string | null; at: number; fromStart?: boolean }): { row: Row; changed: boolean } {
   const state = str(r.state) as JobState;
+  const liveReset = action === "resume" && state === "failed" && r.kind === "live" && r.error_code === "cursor_invalid";
+  if (liveReset && !reanchor) throw new TbError("reanchor_required", "a live job whose reading position Connect refused restarts from a fresh anchor", 409);
   const bad = () => new TbError("job_state_invalid", `cannot ${action} a job that is ${state}`, 409);
   let next: JobState | null = null;
   let pausedBy: string | null = strOrNull(r.paused_by);
@@ -142,7 +158,9 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       break;
     case "resume":
       if (state === "paused" && r.paused_by !== null) next = "queued";
-      else if (state === "failed") {
+      // a read Connect holds waits for the owner with NO automatic recheck (data_pull takes no idempotency key, so every
+      // recheck could make a new hold): Try again calls Connect once more
+      else if (state === "failed" || (state === "waiting" && r.error_code === "connect_held")) {
         next = "queued";
         reset = true;
       } else throw bad();
@@ -160,9 +178,26 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
       next = "cancelled";
       break;
   }
-  db.prepare(
-    `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${reset ? ", consecutive_failures = 0, last_error = NULL, retry_at = NULL" : ""} WHERE id = ?`,
-  ).run(next, pausedBy, now, str(r.id));
+  db.transaction(() => {
+    db.prepare(
+      `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${
+        reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' AND kind = 'backfill' THEN NULL ELSE cursor END, consecutive_failures = 0, same_cursor_count = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
+      } WHERE id = ?`,
+    ).run(next, pausedBy, now, str(r.id));
+    if (liveReset && reanchor?.fromStart) {
+      // a documents source reads its collections again from Connect's start: every document is read again, and a revision Observer
+      // already has is unchanged (documents.ts), so nothing is missed and nothing doubles
+      db.prepare("UPDATE obs_jobs SET cursor = NULL, anchor = NULL, anchor_at = ? WHERE id = ?").run(reanchor.at, str(r.id));
+    } else if (liveReset && reanchor) {
+      // the gap is said honestly: from the last time the job was CAUGHT UP (a page came back exhausted; else its old anchor) to
+      // the fresh anchor. A gap that is still open is kept: the span only grows until a history read covers it.
+      const caught = r.caught_up_at ?? r.anchor_at;
+      const candidates = [caught, r.gap_from].filter((x) => x !== null && x !== undefined).map(Number);
+      const from = candidates.length > 0 ? Math.min(...candidates) : null;
+      const note = `Observer restarted reading from now. Messages between ${from === null ? "the last read" : humanTime(from)} and ${humanTime(reanchor.at)} may be missing: start a history read to fill them.`;
+      db.prepare("UPDATE obs_jobs SET cursor = ?, anchor = ?, anchor_at = ?, note = ?, gap_from = ? WHERE id = ?").run(reanchor.anchor, reanchor.anchor, reanchor.at, note, from ?? reanchor.at, str(r.id));
+    }
+  });
   const row = jobRow(db, str(r.id));
   if (!row) throw notFound("job");
   return { row, changed: true };
@@ -177,6 +212,12 @@ export interface SourceView {
   conversations: string[];
   live: { state: string; lastReadAt: string | null; nextAt: string | null };
   history: { state: string; done: number; total: number | null; since: string | null };
+  /** the Connect dataset: messages (conversations) or documents (`conversations` are then the chosen collections) */
+  dataset: "messages" | "documents";
+  /** Connect can page further back than what it kept */
+  historyCapable: boolean;
+  /** days Connect keeps the account's messages (null: it did not say) */
+  keptDays: number | null;
 }
 export interface Exclude {
   senders: string[];
@@ -231,14 +272,16 @@ function sourceParts(db: Db, r: Row): { view: SourceView; liveJobId: string | nu
       kind: str(r.kind),
       account: str(r.account),
       conversations: conversationsOf(r),
-      // TODO(S2): lastReadAt needs a column the job runner writes after each page (obs_jobs has none yet); null until then.
-      live: { state: live ? str(live.state) : "none", lastReadAt: null, nextAt: live ? iso(live.retry_at) : null },
+      live: { state: live ? str(live.state) : "none", lastReadAt: live ? iso(live.last_read_at) : null, nextAt: live ? iso(live.retry_at) : null },
       history: {
         state: hist ? str(hist.state) : "none",
         done: hist ? Number(hist.read_count) : 0,
         total: hist && hist.max_messages !== null ? Number(hist.max_messages) : null,
         since: hist ? iso(hist.since_at) : null,
       },
+      dataset: r.dataset === "documents" ? "documents" : "messages",
+      historyCapable: Number(r.history_capable) === 1,
+      keptDays: r.kept_days === null || r.kept_days === undefined ? null : Number(r.kept_days),
     },
     liveJobId: live ? str(live.id) : null,
     historyJobId: hist ? str(hist.id) : null,
@@ -277,19 +320,27 @@ export interface NewSource {
   liveIntervalS: number;
   retentionDays: number | null;
   historyCapable: boolean;
+  /** days Connect keeps the account's messages (data_catalog retentionDays) */
+  keptDays: number | null;
+  /** the Connect dataset (default messages) */
+  dataset?: "messages" | "documents";
+  /** Connect's head position, captured BEFORE the job exists (null: the log was empty); the live job reads forward from it */
+  anchor: string | null;
+  anchorAt: number;
 }
-/** A new source and its live job, PAUSED until the owner presses Start (live watching is off by default, C169). */
+/** A new source and its live job, PAUSED until the owner presses Start (live watching is off by default, C169). The live job
+ *  starts at the anchor: when it is started later, it still reads everything that arrived after the source was added. */
 export function createSource(db: Db, s: NewSource, now: number): { source: string; job: string } {
   const source = `src_${ulid(now)}`;
   const job = `job_${ulid(now)}`;
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, now, now);
+      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, kept_days, dataset, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, s.keptDays, s.dataset ?? "messages", now, now);
     db.prepare(
-      `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?)`,
-    ).run(job, source, now, now);
+      `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, cursor, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?, ?, ?, ?)`,
+    ).run(job, source, s.anchor, s.anchor, s.anchorAt, now, now);
   });
   return { source, job };
 }
@@ -349,7 +400,7 @@ export function isExcluded(key: string, ex: Exclude): boolean {
  * After messages of a record were deleted (narrowing) or their text purged: nothing of the removed text may survive in a
  * record, a delivery or a flag. Same transaction as the delete (the caller's).
  *  - unsent deliveries of the record are deleted (they would send the removed text), a sent one keeps its ledger row but its
- *    stored input is emptied (from S4 it holds the text that was sent)
+ *    stored input and its stored call (payload_json: the whole delivered body) are emptied
  *  - narrowing: a record left with no message is deleted with its deliveries and flags; a record that keeps some messages
  *    gets a new revision (its content changed) and goes back to Review if it was approved
  *  - in both modes the thread subject of a touched record is nulled
@@ -364,7 +415,10 @@ function scrubRecords(db: Db, recordIds: Iterable<string>, mode: "narrow" | "pur
       continue;
     }
     db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent'").run(id);
-    db.prepare("UPDATE obs_deliveries SET input_json = '{}', updated_at = ? WHERE record_id = ? AND status = 'sent'").run(now, id);
+    // a delivery that stays as ledger keeps no text: not the input, not the exact call that was stored for a retry (payload_json)
+    db.prepare("UPDATE obs_deliveries SET input_json = '{}', payload_json = NULL, updated_at = ? WHERE record_id = ?").run(now, id);
+    // the document's own metadata (path, link) can name people: it goes with the text
+    db.prepare("UPDATE obs_documents SET path = NULL, url = NULL WHERE record_id = ?").run(id);
     db.prepare(
       `UPDATE obs_records SET state = CASE WHEN state = 'approved' THEN 'review' ELSE state END,
          revision = revision + ?, thread = NULL, updated_at = ? WHERE id = ?`,
@@ -388,6 +442,13 @@ export function dropOutOfScope(db: Db, sourceId: string, removedConversations: s
     const del = db.prepare("DELETE FROM obs_messages WHERE source_id = ? AND conversation = ? AND provider_msg_id = ?");
     for (const m of doomed.values()) del.run(sourceId, m.conversation, m.id);
     scrubRecords(db, [...doomed.values()].flatMap((m) => (m.record ? [m.record] : [])), "narrow", now);
+    // documents: forget the ones of a removed collection, and the ones whose record went (an excluded author), so a source that
+    // is widened again reads them again
+    if (removedConversations.length > 0) {
+      const marks = removedConversations.map(() => "?").join(", ");
+      db.prepare(`DELETE FROM obs_documents WHERE source_id = ? AND collection IN (${marks})`).run(sourceId, ...removedConversations);
+    }
+    db.prepare("DELETE FROM obs_documents WHERE source_id = ? AND record_id IS NOT NULL AND record_id NOT IN (SELECT id FROM obs_records)").run(sourceId);
     return doomed.size;
   });
 }
@@ -397,7 +458,7 @@ export function dropOutOfScope(db: Db, sourceId: string, removedConversations: s
  * One transaction. Documents already delivered to Knowledge stay (the owner deletes them there). This deletes EVERYTHING of the
  * source by design; the privacy setting `onSourceDelete` is NOT consulted here: it is about deletions on the PROVIDER side
  * (a message the provider deleted, DESIGN §5.5), not about the owner removing a source.
- * TODO(S2): also cancel the SDK jobs (`sdk_job_id`) with the runner.
+ * Returns the SDK job ids, so the handler cancels them with the runner (a running tick finds the job gone and ends).
  */
 export function removeSource(db: Db, id: string, now: number): { messagesPurged: number; sdkJobs: string[] } {
   return db.transaction(() => {
@@ -412,6 +473,7 @@ export function removeSource(db: Db, id: string, now: number): { messagesPurged:
     db.prepare(`DELETE FROM obs_deliveries WHERE record_id IN ${records}`).run(id);
     db.prepare("DELETE FROM obs_records WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_messages WHERE source_id = ?").run(id);
+    db.prepare("DELETE FROM obs_documents WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_jobs WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_sources WHERE id = ?").run(id);
     return { messagesPurged, sdkJobs };
@@ -468,6 +530,8 @@ export interface RecordView {
   secret: boolean;
   /** a token in the text looks like a secret (suspect_secret): held for the owner, shown as "possible secret" */
   possibleSecret: boolean;
+  /** Observer could not window or route it (`routing_failed`): held for the owner with its text hidden, NOT a possible secret */
+  problem: string | null;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;
@@ -482,7 +546,10 @@ export const isPossibleSecret = (r: Row): boolean => (parsePii(r.pii_json).suspe
 const ROUTED_STATES = new Set(["review", "approved", "delivered", "dropped"]);
 /** Subject and author handle stay out of every answer while the record is a possible secret, or is not routed yet: a subject can carry the token itself,
  *  and a list title, a heading or an Activity row would show it in clear text. */
-export const metaHidden = (r: Row): boolean => isPossibleSecret(r) || !ROUTED_STATES.has(str(r.state));
+export const metaHidden = (r: Row): boolean => isPossibleSecret(r) || hasProblem(r) || !ROUTED_STATES.has(str(r.state));
+/** Observer could not window or route the record (jobs.ts holdForOwner): the same safe default as a possible secret (held, text
+ *  opens hidden, deliver as is only with acknowledged: true), with its own wording. */
+export const hasProblem = (r: Row): boolean => r.problem !== null && r.problem !== undefined;
 /** Record summary: no message text (lists never carry text). */
 export function recordView(r: Row): RecordView {
   return {
@@ -496,6 +563,7 @@ export function recordView(r: Row): RecordView {
     pii: parsePii(r.pii_json),
     secret: Number(r.secret) === 1,
     possibleSecret: isPossibleSecret(r),
+    problem: strOrNull(r.problem),
     ruleId: strOrNull(r.rule_id),
     actionable: Number(r.actionable) === 1,
     decidedBy: strOrNull(r.decided_by),
@@ -694,8 +762,12 @@ export function decideRecord(
   // the owner decides on the revision they read: a later edit or message changed the record, so the decision would be on text they did not see
   if (d.revision !== undefined && d.revision !== revision) throw new TbError("revision_changed", "the record changed after you read it; read it again before you decide", 409);
   // a record held as a possible secret is delivered AS IT IS only when the owner says so, on purpose (a UI gate alone is not enough)
-  if (d.decision === "deliver" && isPossibleSecret(r) && d.acknowledged !== true) {
-    throw new TbError("acknowledgement_required", "this record was held as a possible secret; delivering it as it is needs acknowledged: true after you read the text", 400);
+  if (d.decision === "deliver" && (isPossibleSecret(r) || hasProblem(r)) && d.acknowledged !== true) {
+    throw new TbError(
+      "acknowledgement_required",
+      isPossibleSecret(r) ? "this record was held as a possible secret; delivering it as it is needs acknowledged: true after you read the text" : "this record was held for you; delivering it as it is needs acknowledged: true after you read the text",
+      400,
+    );
   }
   if (str(r.state) !== "review") throw new TbError("record_not_waiting", `this record is ${str(r.state)}, not waiting for review`, 409);
   if (deliver) {
@@ -747,8 +819,10 @@ export function decideRecord(
 }
 
 /** A held (or any unsent) delivery row of a record that goes back to Review is marked superseded: it may still be approved in Holds, but it must never be sent. */
-export function supersedeHeld(db: Db, recordId: string): void {
-  db.prepare("UPDATE obs_deliveries SET superseded = 1 WHERE record_id = ? AND status IN ('held', 'pending')").run(recordId);
+export function supersedeHeld(db: Db, recordId: string, except = ""): void {
+  // the stored call (payload_json) holds the whole body: a row that will never be sent keeps none of it. `except`: a delivery that
+  // stays sendable (documents.ts retireRecord keeps an attempted document_create so its lost answer can be resolved)
+  db.prepare("UPDATE obs_deliveries SET superseded = 1, payload_json = NULL WHERE record_id = ? AND status IN ('held', 'pending') AND id <> ?").run(recordId, except);
 }
 
 /**
@@ -785,6 +859,8 @@ export function retryDelivery(db: Db, r: Row, now: number): DeliveryView {
     throw new TbError("delivery_state_invalid", "this delivery does not belong to the owner's last decision on the record; decide the record in Review", 409);
   }
   if (str(r.status) !== "failed") throw new TbError("delivery_state_invalid", `cannot retry a delivery that is ${str(r.status)}`, 409);
+  // a delivery that failed for good keeps no stored call (the whole body): the drain builds it again from the stored record, and
+  // when the text is gone (purged, past the retention) the row fails again at once with the plain TEXT_GONE sentence (deliver.ts)
   const first = r.first_attempt_at === null || r.first_attempt_at === undefined ? null : Number(r.first_attempt_at);
   const stale = first !== null && now - first > SAME_KEY_WINDOW_MS;
   const key = stale ? deliveryKey(str(r.record_id), Number(r.revision), str(r.destination), now) : str(r.idem_key);
@@ -959,11 +1035,13 @@ export function reorderRules(db: Db, ids: string[], now: number): RuleView[] {
 export function activeBackfill(db: Db, source: string): boolean {
   return !!db.prepare("SELECT 1 AS x FROM obs_jobs WHERE source_id = ? AND kind = 'backfill' AND state IN ('queued', 'running', 'waiting', 'paused')").get(source);
 }
-export function createBackfill(db: Db, source: string, f: { since: number; until: number | null; maxMessages: number }, now: number): Row {
+/** A history job. `until` is never later than the anchor time: what came after it is the live job's (no gap: overlap is harmless,
+ *  UNIQUE (source, conversation, provider_msg_id)). The cursor starts empty: Connect's start in the job's direction. */
+export function createBackfill(db: Db, source: string, f: { since: number; until: number; maxMessages: number; anchor: string | null; anchorAt: number }, now: number): Row {
   const id = `job_${ulid(now)}`;
   db.prepare(
-    `INSERT INTO obs_jobs (id, source_id, kind, state, since_at, until_at, max_messages, created_at, updated_at) VALUES (?, ?, 'backfill', 'queued', ?, ?, ?, ?, ?)`,
-  ).run(id, source, f.since, f.until, f.maxMessages, now, now);
+    `INSERT INTO obs_jobs (id, source_id, kind, state, since_at, until_at, max_messages, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'backfill', 'queued', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(id, source, f.since, f.until, f.maxMessages, f.anchor, f.anchorAt, now, now);
   const row = jobRow(db, id);
   if (!row) throw notFound("job");
   return row;

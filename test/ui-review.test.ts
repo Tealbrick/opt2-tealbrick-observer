@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { useState } from "react";
-import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, detailOf, flush, h, lastCall, looksLikeKey, mount, REC_BANK, REC_KEY, reset, stub, within } from "./ui-harness.ts";
+import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, detailOf, flush, h, lastCall, looksLikeKey, mount, REC_BANK, REC_KEY, REC_UNSORTED, reset, stub, within } from "./ui-harness.ts";
 
 const ui = compileUi("review");
 type Review = typeof import("../src/ui/review.tsx");
@@ -87,7 +87,7 @@ describe("Review", () => {
     const c = lastCall("review_decide");
     assert.deepEqual(c.input, { recordId: "rec_bank", revision: 1, decision: "deliver_redacted", destination: "knowledge" });
     assertWriteHeaders(c);
-    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. Delivery starts in a later version: the record waits on the Activity page\./);
+    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. The Activity page shows the delivery\./);
     assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent?.slice(0, 8)), ["Messages", "Deploy n", "Messages"]);
     assert.deepEqual(m.opened.at(-1), "rec_key", "the next record is opened");
     await m.unmount();
@@ -121,7 +121,7 @@ describe("Review", () => {
     stub.targets = [];
     const none = await mountReview();
     assert.match(none.host.textContent ?? "", /Observer needs Connect and Knowledge to work\. Connect and Knowledge are not available to it now\. Task Board/);
-    assert.match(none.host.textContent ?? "", /only when Connect offers shared data access, in a later Connect version\. You need to do nothing now\./, "the Connect step");
+    assert.match(none.host.textContent ?? "", /add Connect to this workspace and give it a licence, then share an account with Observer in Connect\./, "the Connect step");
     assert.match(detail(none.host).textContent ?? "", /Knowledge is not available to Observer, so nothing can be delivered now\. You can still drop the record\./);
     assert.ok(control(detail(none.host), "Deliver redacted").disabled);
     assert.ok(!control(detail(none.host), "Drop").disabled);
@@ -142,6 +142,33 @@ describe("Review", () => {
     await click(control(d, "Hide the original text"));
     assert.ok(!(d.textContent ?? "").includes(looksLikeKey()));
     await m.unmount();
+  });
+
+  it("a record Observer could not sort says so in its own words (no possible-secret badge or banner); its text opens hidden", async () => {
+    reset();
+    stub.review = [...stub.review, REC_UNSORTED];
+    const m = await mountReview("rec_unsorted");
+    const d = detail(m.host);
+    assert.match(d.textContent ?? "", /Observer could not sort this record\. It is held for you\. Its text opens hidden\./);
+    assert.ok(!/Possible secret: held/.test(d.textContent ?? "") && ![...d.querySelectorAll(".tb-tag")].some((t) => /possible secret/i.test(t.textContent ?? "")), "no possible-secret banner or badge");
+    assert.ok(!(d.textContent ?? "").includes("[possible secret]"), "not hidden behind the possible-secret label");
+    const row = rows(m.host).find((a) => a.getAttribute("href")?.endsWith("rec_unsorted"));
+    assert.deepEqual([...(row?.querySelectorAll(".tb-tag") ?? [])].map((t) => t.textContent), ["could not sort"]);
+    assert.ok(!(d.textContent ?? "").includes("call the clinic"), "the text opens hidden");
+    assert.match(d.textContent ?? "", /\[text hidden\]/);
+    assert.ok(control(d, "Deliver").disabled, "deliver as is needs the text shown and the tick");
+    await click(control(d, "Show the original text"));
+    assert.ok((d.textContent ?? "").includes("call the clinic"));
+    await click(d.querySelector('input[type="checkbox"]') as Element);
+    await click(control(d, "Deliver"));
+    await flush();
+    assert.deepEqual(lastCall("review_decide").input, { recordId: "rec_unsorted", revision: 1, decision: "deliver", destination: "knowledge", acknowledged: true });
+    // quiet on good: a real possible secret keeps its own wording
+    await m.unmount();
+    const k = await mountReview("rec_key");
+    assert.match(detail(k.host).textContent ?? "", /Possible secret: held for your review\./);
+    assert.ok(!(detail(k.host).textContent ?? "").includes("could not sort"));
+    await k.unmount();
   });
 
   it("Deliver redacted of a possible secret needs no tick and sends no acknowledgement", async () => {
@@ -259,10 +286,10 @@ describe("Review", () => {
     await m.unmount();
   });
 
-  it("says that delivery starts in a later version, and promises none now", async () => {
+  it("says where approved records go (Knowledge; Task Board and Inbox later)", async () => {
     reset();
     const m = await mountReview();
-    assert.match(m.host.textContent ?? "", /Delivery to Knowledge, Task Board and Inbox starts in a later version\./);
+    assert.match(m.host.textContent ?? "", /Observer delivers what you approve to Knowledge \(the area is set on Routing\)\./);
     assert.doesNotMatch(m.host.textContent ?? "", /Nothing reaches Knowledge/);
     await m.unmount();
   });

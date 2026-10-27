@@ -29,8 +29,8 @@ describe("Activity", () => {
     assert.match(cells(r[2] as Element)[2] ?? "", /Operator Inbox/);
     assert.match(cells(r[3] as Element)[1] ?? "", /May duplicate an earlier copy\./);
     assert.match(cells(r[2] as Element)[1] ?? "", /^Messages in Work inbox/, "a possible secret has no subject: its title is the source");
-    assert.match(m.host.textContent ?? "", /Delivery starts in a later version/);
-    assert.doesNotMatch(m.host.textContent ?? "", /raw upstream text must never show/);
+    assert.match(m.host.textContent ?? "", /Observer sends them to Knowledge by itself/);
+    assert.match(cells(r[3] as Element)[1] ?? "", /Knowledge refused: Observer may not write to this area\./, "the failure says why, in Observer's own words");
     assert.match(cells(r[1] as Element)[1] ?? "", /A record that is no longer listed|Messages in/);
     await m.unmount();
   });

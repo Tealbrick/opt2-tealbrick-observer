@@ -10,6 +10,8 @@ type Op = { id: string; audience?: unknown; output?: any; [k: string]: unknown }
 type M = { companions: Companion[]; operations: Op[] };
 const fresh = (): M => structuredClone(manifest) as unknown as M;
 const withCompanion = (c: Companion): M => ({ ...fresh(), companions: [...fresh().companions, c] });
+/** the real manifest with its Connect companion replaced by `c` */
+const withConnect = (c: Companion): M => ({ ...fresh(), companions: [...fresh().companions.filter((x) => x.product !== "connect"), c] });
 const CONNECT_OK: Companion = { product: "connect", operations: [...CONNECT_DATA_OPS], crud: ["read"] };
 const op = (m: M, id: string): Op => {
   const o = m.operations.find((x) => x.id === id);
@@ -22,7 +24,7 @@ describe("companions are pinned: exact operations and crud, no delete", () => {
   it("the real manifest passes, and the pin matches what it declares", () => {
     assert.deepEqual(companionProblems(manifest), []);
     assert.deepEqual(
-      (manifest.companions ?? []).map((c) => [c.product, [...(c.operations ?? [])].sort(), [...(c.crud ?? [])].sort()]),
+      (manifest.companions ?? []).filter((c) => c.product !== "connect").map((c) => [c.product, [...(c.operations ?? [])].sort(), [...(c.crud ?? [])].sort()]),
       Object.entries(PINNED_COMPANIONS).map(([p, v]) => [p, [...v.operations].sort(), [...v.crud].sort()]),
     );
   });
@@ -49,7 +51,7 @@ describe("companions are pinned: exact operations and crud, no delete", () => {
     const m = fresh();
     (m.companions.find((c) => c.product === "kanban") as Companion).crud = ["read", "create", "delete"];
     assert.ok(companionProblems(m).some((p) => p.includes("kanban") && p.includes("delete")));
-    assert.ok(companionProblems(withCompanion({ ...CONNECT_OK, crud: ["read", "delete"] })).some((p) => p.includes("connect") && p.includes("delete")));
+    assert.ok(companionProblems(withConnect({ ...CONNECT_OK, crud: ["read", "delete"] })).some((p) => p.includes("connect") && p.includes("delete")));
   });
   it("fires on an unknown product, a missing companion, a duplicate and a wildcard", () => {
     assert.ok(companionProblems(withCompanion({ product: "mail", operations: ["send"], crud: ["create"] })).some((p) => p.includes('"mail" is not one Observer declares')));
@@ -63,23 +65,36 @@ describe("companions are pinned: exact operations and crud, no delete", () => {
 });
 
 describe("the Connect companion is exactly read-only data ops", () => {
-  it("quiet on good: none yet; the full set; a subset; always crud exactly [read]", () => {
+  it("the real manifest declares it exactly as DESIGN §4.5: the three data ops, crud [read], a read-only purpose", () => {
+    const c = (manifest.companions ?? []).filter((x) => x.product === "connect");
+    assert.deepEqual(
+      c.map((x) => ({ product: x.product, operations: x.operations, crud: x.crud, purpose: (x as { purpose?: string }).purpose })),
+      [{ product: "connect", operations: ["data_accounts_list", "data_catalog", "data_pull"], crud: ["read"], purpose: "Read the conversations and document collections you shared with Observer. Read only: Observer cannot send, edit or delete." }],
+    );
+  });
+  it("quiet on good: the real one; the full set; a subset; always crud exactly [read]", () => {
     assert.deepEqual(connectCompanionProblems(manifest), []);
-    assert.deepEqual(companionProblems(withCompanion(CONNECT_OK)), []);
-    assert.deepEqual(companionProblems(withCompanion({ ...CONNECT_OK, operations: ["data_pull"] })), []);
+    assert.deepEqual(companionProblems(withConnect(CONNECT_OK)), []);
+    assert.deepEqual(companionProblems(withConnect({ ...CONNECT_OK, operations: ["data_pull"] })), []);
+  });
+  it("fires when the Connect companion is missing (Observer reads nothing without it)", () => {
+    const m = fresh();
+    m.companions = m.companions.filter((c) => c.product !== "connect");
+    assert.deepEqual(companionProblems(m), ['companion "connect" is missing']);
+    assert.deepEqual(connectCompanionProblems(m), [], "the read-only check itself has nothing to say about an absent one");
   });
   it("fires when a send op is added", () => {
     for (const op of ["send_message", "data_send", "reply", "tools"]) {
-      const problems = connectCompanionProblems(withCompanion({ ...CONNECT_OK, operations: [...CONNECT_DATA_OPS, op] }));
+      const problems = connectCompanionProblems(withConnect({ ...CONNECT_OK, operations: [...CONNECT_DATA_OPS, op] }));
       assert.equal(problems.length, 1, op);
       assert.match(problems[0] ?? "", new RegExp(`"${op}"`));
     }
   });
   it("fires on a write crud (create, update, delete), an empty crud and an empty operation list", () => {
     for (const crud of [["read", "create"], ["read", "update"], ["read", "delete"], ["create"], []]) {
-      assert.ok(connectCompanionProblems(withCompanion({ ...CONNECT_OK, crud })).some((p) => p.includes("crud")), JSON.stringify(crud));
+      assert.ok(connectCompanionProblems(withConnect({ ...CONNECT_OK, crud })).some((p) => p.includes("crud")), JSON.stringify(crud));
     }
-    assert.ok(connectCompanionProblems(withCompanion({ ...CONNECT_OK, operations: [] })).some((p) => p.includes("no operations")));
+    assert.ok(connectCompanionProblems(withConnect({ ...CONNECT_OK, operations: [] })).some((p) => p.includes("no operations")));
   });
   it("fires on a second Connect entry", () => {
     assert.ok(connectCompanionProblems({ companions: [CONNECT_OK, CONNECT_OK], operations: [] }).some((p) => p.includes("more than one")));

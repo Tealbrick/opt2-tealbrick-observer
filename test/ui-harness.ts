@@ -40,10 +40,10 @@ const iso = (ms: number) => new Date(ms).toISOString();
 export const ALL_TARGETS = ["connect", "knowledge", "kanban", "inbox"];
 export const RULE_ZERO = "rul_00000000000000000000000000";
 
-export const SRC_GMAIL = { id: "src_gmail", label: "Work inbox", kind: "gmail", account: "acc_gmail", conversations: ["clients", "suppliers"], live: { state: "running", lastReadAt: null, nextAt: null }, history: { state: "running", done: 18240, total: 50000, since: "2026-01-01T00:00:00.000Z" } };
-export const SRC_TG = { id: "src_tg", label: "Clinic partners", kind: "telegram", account: "acc_tg", conversations: ["group"], live: { state: "waiting", lastReadAt: null, nextAt: iso(NOW + 40_000) }, history: { state: "none", done: 0, total: null, since: null } };
-export const SRC_NEW = { id: "src_new", label: "Team updates", kind: "buzz", account: "acc_buzz", conversations: ["updates"], live: { state: "paused", lastReadAt: null, nextAt: null }, history: { state: "none", done: 0, total: null, since: null } };
-const job = (id: string, source: string, kind: "live" | "backfill", state: string, extra: Record<string, unknown> = {}) => ({ id, source, kind, state, counts: { read: 0, records: 0, failures: 0 }, lastError: null, retryAt: null, ...extra });
+export const SRC_GMAIL = { id: "src_gmail", label: "Work inbox", kind: "gmail", account: "acc_gmail", conversations: ["clients", "suppliers"], live: { state: "running", lastReadAt: null, nextAt: null }, history: { state: "running", done: 18240, total: 50000, since: "2026-01-01T00:00:00.000Z" }, historyCapable: true, keptDays: null };
+export const SRC_TG = { id: "src_tg", label: "Clinic partners", kind: "telegram", account: "acc_tg", conversations: ["group"], live: { state: "waiting", lastReadAt: null, nextAt: iso(NOW + 40_000) }, history: { state: "none", done: 0, total: null, since: null }, historyCapable: false, keptDays: 30 };
+export const SRC_NEW = { id: "src_new", label: "Team updates", kind: "buzz", account: "acc_buzz", conversations: ["updates"], live: { state: "paused", lastReadAt: null, nextAt: null }, history: { state: "none", done: 0, total: null, since: null }, historyCapable: true, keptDays: null };
+const job = (id: string, source: string, kind: "live" | "backfill", state: string, extra: Record<string, unknown> = {}) => ({ id, source, kind, state, counts: { read: 0, records: 0, failures: 0, skipped: 0 }, lastError: null, retryAt: null, note: null, ...extra });
 export const JOBS = [job("job_gmail_live", "src_gmail", "live", "running"), job("job_gmail_hist", "src_gmail", "backfill", "running"), job("job_tg_live", "src_tg", "live", "waiting", { retryAt: iso(NOW + 40_000) }), job("job_new_live", "src_new", "live", "paused")];
 
 /** A string that LOOKS like a key. Built at run time: no secret-shaped literal sits in this file. */
@@ -62,6 +62,7 @@ const rec = (id: string, thread: string | null, extra: Record<string, unknown> =
   pii: {},
   secret: false,
   possibleSecret: false,
+  problem: null,
   ruleId: null,
   actionable: false,
   decidedBy: null,
@@ -76,6 +77,8 @@ export const REC_BANK = rec("rec_bank", "Invoice question from M. Horak", { pii:
 export const REC_KEY = rec("rec_key", null, { pii: { suspect_secret: 1 }, possibleSecret: true });
 export const REC_SECRET = rec("rec_secret", "Deploy notes", { pii: { secret: 1 }, secret: true });
 export const REC_PLAIN = rec("rec_plain", null, { source: "src_tg" });
+/** A record Observer could not sort (routing_failed): held, text hidden, not a possible secret. */
+export const REC_UNSORTED = rec("rec_unsorted", null, { problem: "routing_failed" });
 const message = (text: string | null, spans: unknown[], extra: Record<string, unknown> = {}) => ({ conversation: "clients", id: `m_${Math.random().toString(36).slice(2, 8)}`, thread: null, sentAt: iso(NOW - 3 * 3_600_000), editedAt: null, deleted: false, author: "email:horak@example.com", authorKind: "person", text, spans, ...extra });
 export function detailOf(r: ReturnType<typeof rec>): Record<string, unknown> {
   if (r.id === "rec_bank") return { ...r, messages: [message(msgText, [spanOf(msgText, "CZ6508000000192000145399", "iban"), spanOf(msgText, "+420 123 456 789", "phone")]), message("Thanks, I will tell accounting.", [], { author: "me", authorKind: "self" })] };
@@ -83,6 +86,7 @@ export function detailOf(r: ReturnType<typeof rec>): Record<string, unknown> {
     const t = `New key for the booking system: ${looksLikeKey()}`;
     return { ...r, messages: [message(t, [spanOf(t, looksLikeKey(), "suspect_secret")], { author: "" })] };
   }
+  if (r.id === "rec_unsorted") return { ...r, messages: [message("Can you call the clinic about the order?", [])] };
   if (r.id === "rec_secret") return { ...r, messages: [message("Deploy notes: the key is [secret removed]", [])] };
   return { ...r, messages: [message("Lunch on Friday?", [])] };
 }
@@ -98,14 +102,20 @@ export const DELIVERIES = [
   delivery("dlv_sent", "rec_bank", "knowledge", "sent", { targetRef: "doc_1" }),
   delivery("dlv_pending", "rec_plain", "kanban", "pending"),
   delivery("dlv_held", "rec_key", "inbox", "held", { holdId: "hld_1" }),
-  delivery("dlv_failed", "rec_bank", "knowledge", "failed", { nextAt: iso(NOW + 40 * 60_000), lastError: "raw upstream text must never show", warning: "may_duplicate: the first attempt was more than 23 hours ago" }),
+  delivery("dlv_failed", "rec_bank", "knowledge", "failed", { nextAt: iso(NOW + 40 * 60_000), lastError: "Knowledge refused: Observer may not write to this area. Give Observer write access to the area in Knowledge, or pick another area on Routing, then press Retry.", warning: "may_duplicate: the first attempt was more than 23 hours ago" }),
   delivery("dlv_super", "rec_key", "knowledge", "held", { holdId: "hld_2", superseded: true }),
 ];
 export const PRIVACY = { textRetentionDays: 30, reviewRetentionDays: 90, onSourceDelete: "purge" };
 export const ACCOUNTS = [
-  { id: "acc_gmail", kind: "gmail", label: "work@example.com", historyCapable: true, conversations: [{ id: "clients", title: "Label “Clients”", estimate: 28500 }, { id: "suppliers", title: "Label “Suppliers”", estimate: 4100 }, { id: "all", title: "Inbox (all mail)", estimate: null }] },
-  { id: "acc_tg", kind: "telegram", label: "Front desk bot", historyCapable: false, conversations: [{ id: "group", title: "Clinic partners", estimate: null }] },
+  { id: "acc_gmail", kind: "gmail", label: "work@example.com", historyCapable: true, retentionDays: null, conversations: [{ id: "clients", title: "Label “Clients”", estimate: 28500 }, { id: "suppliers", title: "Label “Suppliers”", estimate: 4100 }, { id: "all", title: "Inbox (all mail)", estimate: null }] },
+  { id: "acc_tg", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "group", title: "Clinic partners", estimate: null }] },
 ];
+/** An account with both datasets (an MCP account of the Acme mock sources): the answer depends on the dataset asked for. */
+export const ACME_MCP = { id: "acc_acme", kind: "mcp", label: "Acme LLC mock sources" };
+export const acmeAs = (dataset: string) =>
+  dataset === "documents"
+    ? { ...ACME_MCP, dataset: "documents", datasets: ["messages", "documents"], historyCapable: false, retentionDays: null, conversations: [{ id: "finance", title: "Finance", estimate: 12 }, { id: "public.orders", title: "public.orders", estimate: 40 }] }
+    : { ...ACME_MCP, dataset: "messages", datasets: ["messages", "documents"], historyCapable: false, retentionDays: 30, conversations: [{ id: "support", title: "#support", estimate: 9 }] };
 
 // ── stub server ────────────────────────────────────────────────────────────
 export interface Call {
@@ -134,6 +144,9 @@ export interface Stub {
   deliveries: unknown[];
   accounts: unknown[];
   privacy: Record<string, unknown>;
+  /** the owner's delivery area (null: the company area) */
+  area: string | null;
+  knowledgeAreas: { id: string; label: string; kind: string; access: string }[];
 }
 export const stub = {} as Stub;
 export function reset(): void {
@@ -153,6 +166,11 @@ export function reset(): void {
     deliveries: structuredClone(DELIVERIES),
     accounts: structuredClone(ACCOUNTS),
     privacy: { ...PRIVACY },
+    area: null,
+    knowledgeAreas: [
+      { id: "company", label: "Company", kind: "shared", access: "read_write" },
+      { id: "agt-scout", label: "Scout (own memory)", kind: "agent", access: "read" },
+    ],
   });
 }
 reset();
@@ -165,7 +183,11 @@ function answer(op: string, input: Record<string, any>): unknown {
     case "tb.holds_list":
       return { items: [], nextCursor: null };
     case "sources_available":
-      return { accounts: stub.connectMissing ? [] : stub.accounts, connectMissing: stub.connectMissing, targets: stub.targets };
+      // like the server: the list names the accounts only; one account comes with its catalog
+      if (stub.connectMissing) return { accounts: [], connectMissing: true, targets: stub.targets };
+      if (input.account === ACME_MCP.id) return { accounts: [acmeAs(input.dataset ?? "messages")], connectMissing: false, targets: stub.targets };
+      if (input.account) return { accounts: (stub.accounts as { id: string }[]).filter((a) => a.id === input.account), connectMissing: false, targets: stub.targets };
+      return { accounts: (stub.accounts as { id: string; kind: string; label: string }[]).map(({ id, kind, label }) => ({ id, kind, label })), connectMissing: false, targets: stub.targets };
     case "sources_list":
       return { sources: stub.sources };
     case "jobs_list":
@@ -173,7 +195,7 @@ function answer(op: string, input: Record<string, any>): unknown {
     case "job_control":
       return { job: { ...(stub.jobs as { id: string }[]).find((j) => j.id === input.id), state: "queued" } };
     case "source_add":
-      return { source: { ...SRC_NEW, id: "src_made", label: input.label, account: input.account, conversations: input.conversations } };
+      return { source: { ...SRC_NEW, id: "src_made", label: input.label, account: input.account, conversations: input.conversations, dataset: input.dataset ?? "messages" } };
     case "backfill_estimate":
       return { messages: 1200, records: 140, durationS: 600, providerNote: null };
     case "backfill_start":
@@ -212,6 +234,20 @@ function answer(op: string, input: Record<string, any>): unknown {
       return stub.privacy;
     case "purge":
       return { purged: 7 };
+    case "delivery_target_get": {
+      const missing = !stub.targets.includes("knowledge");
+      return {
+        area: stub.area,
+        effectiveArea: stub.area ?? "company",
+        areas: missing ? [] : stub.knowledgeAreas,
+        knowledgeMissing: missing,
+        error: null,
+        counts: { pending: 1, held: 0, sent: 3, failed: 1 },
+      };
+    }
+    case "delivery_target_set":
+      stub.area = input.area;
+      return { area: input.area };
     default:
       return {};
   }

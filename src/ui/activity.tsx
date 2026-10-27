@@ -25,7 +25,7 @@ export function StatusTag({ d }: { d: Delivery }) {
     case "failed":
       return <Tag status="needs-you">{d.nextAt ? `Failed · retry ${until(d.nextAt)}` : "Failed"}</Tag>;
     default:
-      return <Tag status="busy">Waiting to send</Tag>;
+      return <Tag status="busy">{d.nextAt ? `Waiting to send · next try ${until(d.nextAt)}` : "Waiting to send"}</Tag>;
   }
 }
 
@@ -63,7 +63,7 @@ export function ActivityPage() {
 
   return (
     <section className="app-page" aria-label="Activity">
-      <PageHead title="Activity" lede="Records you approved, and where they go. Delivery starts in a later version, so rows wait until then. Every delivery is keyed to its record, so a retry never makes a second copy.">
+      <PageHead title="Activity" lede="Records you approved, and where they go. Observer sends them to Knowledge by itself; Task Board and Inbox come in a later version. Every delivery is keyed to its record, so a retry never makes a second copy.">
         <div className="ob-filter">
           <span className="tb-label" id="ob-filter-label">
             Show
@@ -99,7 +99,8 @@ export function ActivityPage() {
                   <td className="strong">
                     {d.titles.get(x.recordId) ?? "A record that is no longer listed"}
                     {x.warning ? <span className="ob-warn"> {x.warning.startsWith("may_duplicate") ? "May duplicate an earlier copy." : x.warning}</span> : null}
-                    {x.status === "failed" ? <span className="ob-warn"> The destination did not take it.</span> : null}
+                    {/* last_error is always one of Observer's own sentences (src/deliver.ts), never the destination's words */}
+                    {x.status !== "sent" && x.lastError ? <span className="ob-warn"> {x.lastError}</span> : x.status === "failed" ? <span className="ob-warn"> The destination did not take it.</span> : null}
                   </td>
                   <td>
                     <span className="ob-dest-cell">

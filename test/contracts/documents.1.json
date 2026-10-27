@@ -1,0 +1,1193 @@
+{
+  "valid": [
+    {
+      "rows": [
+        {
+          "id": "file:///acme/finance/q3-board-memo.md",
+          "collection": "Acme LLC/Finance",
+          "title": "Q3 board memo",
+          "path": "Acme LLC/Finance/Q3 board memo",
+          "url": "https://docs.example.com/acme/finance/q3-board-memo",
+          "mime": "text/markdown",
+          "updatedAt": "2026-10-20T09:30:00Z",
+          "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": {
+            "handle": "email:finance@example.com",
+            "display": "Acme Finance"
+          },
+          "kind": "document",
+          "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+          "untrusted": true,
+          "truncated": false
+        },
+        {
+          "id": "public.invoices:1",
+          "collection": "public.invoices",
+          "title": "public.invoices (page 1)",
+          "mime": "text/csv",
+          "updatedAt": "2026-10-21T08:00:00.250Z",
+          "rev": "row-version-17",
+          "kind": "table",
+          "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+          "untrusted": true
+        },
+        {
+          "id": "file:///acme/finance/old-budget.md",
+          "collection": "Acme LLC/Finance",
+          "title": "",
+          "mime": "text/markdown",
+          "updatedAt": "2026-10-22T12:00:00Z",
+          "rev": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "deleted": true,
+          "text": "",
+          "untrusted": true
+        }
+      ],
+      "nextCursor": null,
+      "exhausted": true
+    },
+    {
+      "rows": [],
+      "nextCursor": "c2",
+      "exhausted": false,
+      "retryAfterS": 30
+    },
+    {
+      "rows": [
+        {
+          "id": "file:///acme/finance/q3-board-memo.md",
+          "collection": "Acme LLC/Finance",
+          "title": "Q3 board memo",
+          "path": "Acme LLC/Finance/Q3 board memo",
+          "url": "https://docs.example.com/acme/finance/q3-board-memo",
+          "mime": "text/markdown",
+          "updatedAt": "2026-10-20T09:30:00Z",
+          "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": {
+            "handle": "email:finance@example.com",
+            "display": "Acme Finance"
+          },
+          "kind": "document",
+          "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+          "untrusted": true,
+          "truncated": true,
+          "extra_member": "ignored (L24)"
+        }
+      ],
+      "nextCursor": null,
+      "exhausted": true
+    },
+    {
+      "rows": [
+        {
+          "id": "file:///acme/finance/q3-board-memo.md",
+          "collection": "Acme LLC/Finance",
+          "title": "Q3 board memo",
+          "path": "Acme LLC/Finance/Q3 board memo",
+          "url": "https://docs.example.com/acme/finance/q3-board-memo",
+          "mime": "text/markdown",
+          "updatedAt": "2026-10-20T09:30:00Z",
+          "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": {
+            "handle": "Alice B",
+            "raw": true,
+            "display": "Alice B"
+          },
+          "kind": "document",
+          "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+          "untrusted": true,
+          "truncated": false
+        }
+      ],
+      "nextCursor": null,
+      "exhausted": true
+    },
+    {
+      "rows": [
+        {
+          "id": "file:///acme/finance/q3-board-memo.md",
+          "collection": "Acme LLC/Finance",
+          "title": "Q3 board memo",
+          "path": "Acme LLC/Finance/Q3 board memo",
+          "url": "https://docs.example.com/acme/q3?page=2",
+          "mime": "text/markdown",
+          "updatedAt": "2026-10-20T09:30:00Z",
+          "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "author": {
+            "handle": "email:finance@example.com",
+            "display": "Acme Finance"
+          },
+          "kind": "document",
+          "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+          "untrusted": true,
+          "truncated": false
+        }
+      ],
+      "nextCursor": null,
+      "exhausted": true
+    }
+  ],
+  "invalid": [
+    {
+      "why": "untrusted not true",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": false,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "mime text/html refused (the producer converts HTML to text/markdown)",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/html",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "mime application/pdf refused",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "application/pdf",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "http url refused (https only)",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "http://docs.example.com/acme/q3",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "title empty on a row that is not deleted",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "deleted false with empty title",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false,
+            "deleted": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "deleted true with non-empty text",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "still here",
+            "untrusted": true,
+            "truncated": false,
+            "deleted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "updatedAt with a time zone offset",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00+02:00",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "unknown kind",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "spreadsheet",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "empty rev",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "author without handle",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "more than 50 rows",
+      "doc": {
+        "rows": [
+          {
+            "id": "public.invoices:1",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:2",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:3",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:4",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:5",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:6",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:7",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:8",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:9",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:10",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:11",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:12",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:13",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:14",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:15",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:16",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:17",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:18",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:19",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:20",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:21",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:22",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:23",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:24",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:25",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:26",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:27",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:28",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:29",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:30",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:31",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:32",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:33",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:34",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:35",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:36",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:37",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:38",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:39",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:40",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:41",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:42",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:43",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:44",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:45",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:46",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:47",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:48",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:49",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:50",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          },
+          {
+            "id": "public.invoices:51",
+            "collection": "public.invoices",
+            "title": "public.invoices (page 1)",
+            "mime": "text/csv",
+            "updatedAt": "2026-10-21T08:00:00.250Z",
+            "rev": "row-version-17",
+            "kind": "table",
+            "text": "id,customer,amount_cents,status\n1001,Acme LLC,12500,paid\n1002,Acme LLC,8000,open\n",
+            "untrusted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "exhausted missing",
+      "doc": {
+        "rows": [],
+        "nextCursor": null
+      }
+    },
+    {
+      "why": "required member id missing",
+      "doc": {
+        "rows": [
+          {
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "author handle empty",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": ""
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "author handle not canonical and raw not true",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "Alice B"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "author handle not canonical and raw false",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/finance/q3-board-memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "Alice B",
+              "raw": false
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "url with userinfo",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://user:pw@docs.example.com/acme/q3",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "url with a space",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/q3 memo",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "url with a fragment",
+      "doc": {
+        "rows": [
+          {
+            "id": "file:///acme/finance/q3-board-memo.md",
+            "collection": "Acme LLC/Finance",
+            "title": "Q3 board memo",
+            "path": "Acme LLC/Finance/Q3 board memo",
+            "url": "https://docs.example.com/acme/q3#top",
+            "mime": "text/markdown",
+            "updatedAt": "2026-10-20T09:30:00Z",
+            "rev": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "author": {
+              "handle": "email:finance@example.com",
+              "display": "Acme Finance"
+            },
+            "kind": "document",
+            "text": "# Q3 board memo\n\nRevenue grew 12% against plan. Acme LLC keeps hiring flat until Q1.\n",
+            "untrusted": true,
+            "truncated": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    }
+  ]
+}

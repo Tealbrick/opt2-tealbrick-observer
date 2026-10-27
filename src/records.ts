@@ -15,9 +15,10 @@
 //  - KNOWN LIMIT: a secret split across two DIFFERENT records (two windows 30+ minutes apart) is not found.
 import { ulid } from "@opt2-tealbrick/manifest";
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
-import { classifyMeta, classifyRecord } from "./classify.ts";
+import { type ClassifyConfig, classifyMeta, classifyRecord, classifyText } from "./classify.ts";
 import { detectSecrets } from "./detect/secret.ts";
 import { detectSuspect } from "./detect/suspect.ts";
+import { isPiiClass } from "./detect/types.ts";
 import { loadClassifierConfig, parsePii, type Row, recordRow, supersedeHeld } from "./store.ts";
 import type { MessageWindow } from "./window.ts";
 
@@ -30,13 +31,35 @@ export function recordTexts(db: Db, recordId: string): (string | null)[] {
     .map((r) => (r.text === null ? null : str(r.text)));
 }
 
-/** Thread subjects and author handles of a record, classified with the secret and suspect detectors. */
+/** The string members of a documents/1 record besides its text: path, link and collection (the title is the record's thread). Empty
+ *  for a record that is not a document. */
+export function documentMeta(db: Db, recordId: string): string[] {
+  const out: string[] = [];
+  for (const r of db.prepare("SELECT path, url, collection FROM obs_documents WHERE record_id = ?").all(recordId)) for (const v of [r.path, r.url, r.collection]) if (v !== null && v !== undefined) out.push(str(v));
+  return out;
+}
+
+/** Thread subjects, author handles and (for a document) path, link and collection of a record, classified with the secret and suspect detectors. */
 export function recordMetaFacts(db: Db, recordId: string): { secret: number; suspect: number } {
   const values: (string | null)[] = [];
   for (const r of db.prepare("SELECT DISTINCT thread, author_ref FROM obs_messages WHERE record_id = ?").all(recordId)) values.push(r.thread === null ? null : str(r.thread), str(r.author_ref));
   const thread = db.prepare("SELECT thread FROM obs_records WHERE id = ?").get(recordId)?.thread;
-  values.push(thread === null || thread === undefined ? null : str(thread));
+  values.push(thread === null || thread === undefined ? null : str(thread), ...documentMeta(db, recordId));
   return classifyMeta(values);
+}
+
+/** Personal data in the metadata of a DOCUMENT: its title, path, link and collection are looked at like the body (class → count,
+ *  never the value), so personal data found only there routes the document to Review like personal data in the text. {} for a
+ *  record that is not a document. */
+export function recordMetaPii(db: Db, recordId: string, cfg: ClassifyConfig): Record<string, number> {
+  const meta = documentMeta(db, recordId);
+  if (meta.length === 0) return {};
+  const thread = db.prepare("SELECT thread FROM obs_records WHERE id = ?").get(recordId)?.thread;
+  const values = new Set<string>(meta);
+  if (thread !== null && thread !== undefined) values.add(str(thread));
+  const out: Record<string, number> = {};
+  for (const v of values) for (const [c, n] of Object.entries(classifyText(v, cfg).classes)) if (isPiiClass(c)) out[c] = (out[c] ?? 0) + n;
+  return out;
 }
 
 export function purgeRecordText(db: Db, recordId: string, now: number): void {
@@ -126,6 +149,7 @@ export function reclassifyRecord(db: Db, recordId: string, now: number): boolean
     facts.secret = true;
   }
   if (meta.suspect > 0) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, meta.suspect);
+  for (const [c, n] of Object.entries(recordMetaPii(db, recordId, loadClassifierConfig(db)))) facts.classes[c] = (facts.classes[c] ?? 0) + n;
   const before = parsePii(rec.pii_json);
   const hadSecret = Number(rec.secret) === 1 || (before.secret ?? 0) > 0;
   const grew = (facts.secret && !hadSecret) || Object.entries(facts.classes).some(([c, n]) => c !== "secret" && n > (before[c] ?? 0));

@@ -7,8 +7,8 @@
 //   person the owner's UI: sources, jobs, rules, review, records, deliveries, privacy, purge
 // Observer declares no scopes: agents can read nothing but the status counts, so there is no instance to check.
 //
-// S1 scope: the owner ops on the real tables. NOT here yet: reading sources (needs Connect's data_* ops, spec request R3 →
-// `connect_unavailable`), the job runner (S2), classification (S3), sending deliveries (S4), the UI (S5), retention jobs (S6).
+// Reading sources (S2): through Connect's data_* ops (src/connect.ts) by jobs on the SDK runner (src/jobs.ts); without a
+// reachable Connect the source ops answer `connect_unavailable`. NOT here yet: sending deliveries (S4), retention jobs (S6).
 
 import type { OpContext } from "@opt2-tealbrick/miniapp-sdk";
 import { type Db, defineApp, type HandlerSpec, type SdkAppDefinition, TbError } from "@opt2-tealbrick/miniapp-sdk";
@@ -17,6 +17,8 @@ import {
   type BackfillStartInput,
   type DeliveriesListInput,
   type DeliveryRetryInput,
+  type DeliveryTargetGetInput,
+  type DeliveryTargetSetInput,
   type FlagInput,
   type FlagOutput,
   type JobControlInput,
@@ -48,9 +50,12 @@ import {
   type StatusOutput,
 } from "#kit";
 import { now, setClock } from "./clock.ts";
-import { companionTargets, connectPort, requireConnect } from "./connect.ts";
+import { companionTargets, connectPort, connectRefusal, requireConnect, viaConnect } from "./connect.ts";
+import { DOCUMENTS_DATASET, MESSAGES_DATASET } from "./contract.ts";
+import { chosenArea, DELIVER_KIND, defaultArea, deliverJob, deliveryCounts, ensureDrainJob, HUMAN_EDITED, KNOWLEDGE, KNOWLEDGE_MISSING, knowledgeAreas, setChosenArea } from "./deliver.ts";
 import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
+import { BACKFILL_KIND, DOC_DEFAULT_INTERVAL_S, jobSpec, jobsAttention, jobsOf, LIVE_KIND, reconcileJobs, syncSdkJob } from "./jobs.ts";
 import { manifest, migrationsDir } from "./manifest.ts";
 import {
   activeBackfill,
@@ -135,6 +140,33 @@ function needSource(db: Db, id: string): Record<string, unknown> {
 
 const MAX_SOURCES = 100;
 
+export const DOCUMENTS_NO_HISTORY = "A documents source reads every document of its collections when you start it, so there is no separate history read.";
+
+/** The collections other documents sources of this account already read (one collection, one source: dedupe per account). */
+function takenCollections(db: Db, account: string, except: string | null): Set<string> {
+  const out = new Set<string>();
+  for (const r of db.prepare("SELECT id, conversations_json FROM obs_sources WHERE account = ? AND dataset = 'documents'").all(account)) {
+    if (except !== null && String(r.id) === except) continue;
+    for (const c of conversationsOf(r)) out.add(c);
+  }
+  return out;
+}
+
+/** A history read ends this long after its anchor time: clocks of Connect, the provider and Observer differ a little, and a
+ *  message can be in flight while the anchor is taken. Reading 5 minutes too far is harmless (UNIQUE per message: the live job
+ *  may have stored it already); reading too little would be a gap. */
+export const BACKFILL_UNTIL_MARGIN_MS = 5 * 60_000;
+
+/** Where Connect's log of the account is now: a no-cursor pull answers `anchor` (absent when the log is empty: then the start is
+ *  the anchor). Taken BEFORE the job exists, so the job's start can never be later than this moment (no gap). */
+async function captureAnchor(port: ReturnType<typeof requireConnect>, account: string, direction: "forward" | "backward"): Promise<string | null> {
+  try {
+    return (await port.pull({ account, direction, cursor: null, limit: 1, lane: "live" })).anchor;
+  } catch (e) {
+    throw connectRefusal(e);
+  }
+}
+
 /**
  * Who a record, a pause or a decision is attributed to (SDK-CALLER-PRODUCT, SDK 0.1.27). An app caller is keyed on its VERIFIED
  * product (`ctx.caller.product`, set from the Portal-signed slice), never on `ctx.caller.name` or the manifest name: two apps can
@@ -171,7 +203,10 @@ export const handlers = {
       const r = jobRow(ctx.db, i.jobId);
       if (!r || !["queued", "running", "waiting", "paused"].includes(String(r.state))) throw notFound("job");
       const { row, changed } = transitionJob(ctx.db, r, "pause", callerKey(ctx), now());
-      if (changed) ctx.statusChanged();
+      if (changed) {
+        syncSdkJob(jobsOf(ctx), ctx.db, String(row.id));
+        ctx.statusChanged();
+      }
       return { job: { id: String(row.id), state: String(row.state) } };
     },
   }),
@@ -201,11 +236,17 @@ export const handlers = {
 
   // ───────────────────────────────────────────── person ops: sources
   [OP.sourcesAvailable]: op<SourcesAvailableInput, unknown>({
-    async run(_i, ctx) {
+    async run(i, ctx) {
       const port = connectPort(ctx);
       const targets = targetsOf(ctx);
       if (!port) return { accounts: [], connectMissing: true, targets };
-      return { accounts: await port.accounts(), connectMissing: false, targets };
+      // the list is ONE call; the conversations of an account (one catalog call) only when the owner picked it
+      const account = (i as { account?: string }).account;
+      if (account !== undefined) {
+        const a = await viaConnect(() => port.account(account, i.dataset));
+        return { accounts: a ? [a] : [], connectMissing: false, targets };
+      }
+      return { accounts: await viaConnect(() => port.accounts()), connectMissing: false, targets };
     },
   }),
   [OP.sourcesList]: op<SourcesListInput, unknown>({
@@ -227,11 +268,23 @@ export const handlers = {
       const conversations = [...new Set(i.conversations)];
       if (conversations.length === 0) throw new TbError("conversations_empty", "choose at least one conversation", 400);
       if (Number(ctx.db.prepare("SELECT COUNT(*) AS c FROM obs_sources").get()?.c ?? 0) >= MAX_SOURCES) throw new TbError("sources_limit", `at most ${MAX_SOURCES} sources`, 409);
-      const account = (await port.accounts()).find((a) => a.id === i.account);
-      if (!account) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
+      const dataset = i.dataset ?? MESSAGES_DATASET;
+      const docs = dataset === DOCUMENTS_DATASET;
+      const account = await viaConnect(() => port.account(i.account, dataset));
+      if (!account) throw new TbError("account_not_shared", docs ? "this account shares no documents with Observer in Connect" : "this account is not shared with Observer in Connect", 404);
       const known = new Set(account.conversations.map((c) => c.id));
       const unknown = conversations.find((c) => !known.has(c));
-      if (unknown !== undefined) throw new TbError("conversation_unknown", `the account has no conversation "${unknown.slice(0, 80)}"`, 400);
+      if (unknown !== undefined) throw new TbError("conversation_unknown", `the account has no ${docs ? "collection" : "conversation"} "${unknown.slice(0, 80)}"`, 400);
+      // documents are deduplicated on (account, collection, id): one collection is read by one source only
+      if (docs) {
+        const taken = takenCollections(ctx.db, account.id, null);
+        const twice = conversations.find((c) => taken.has(c));
+        if (twice !== undefined) throw new TbError("collection_taken", `another source already reads the collection "${twice.slice(0, 80)}" of this account`, 409);
+      }
+      // messages: the anchor FIRST, the live job reads forward from it, so nothing that arrives after this moment can be missed.
+      // documents: no anchor, the job reads every document of the collections from Connect's start (then follows the changes)
+      const anchor = docs ? null : await captureAnchor(port, account.id, "forward");
+      const anchorAt = now();
       const made = createSource(
         ctx.db,
         {
@@ -240,11 +293,15 @@ export const handlers = {
           label,
           conversations,
           exclude: normalizeExclude(i.exclude ?? {}, { senders: [], domains: [] }),
-          liveIntervalS: i.liveIntervalS ?? 60,
+          liveIntervalS: i.liveIntervalS ?? (docs ? DOC_DEFAULT_INTERVAL_S : 60),
           retentionDays: i.retentionDays ?? null,
           historyCapable: account.historyCapable,
+          keptDays: account.retentionDays,
+          anchor,
+          anchorAt,
+          dataset,
         },
-        now(),
+        anchorAt,
       );
       ctx.statusChanged();
       return { source: sourceView(ctx.db, needSource(ctx.db, made.source)) };
@@ -258,7 +315,23 @@ export const handlers = {
       const before = conversationsOf(r);
       const conversations = i.conversations !== undefined ? [...new Set(i.conversations)] : before;
       if (conversations.length === 0) throw new TbError("conversations_empty", "a source needs at least one conversation (remove the source to stop watching)", 400);
-      // TODO(S2): check the conversation ids against Connect's catalog, and re-run the estimate when the list widens.
+      // widening needs Connect: a new conversation id must be one the account has (narrowing works without Connect). The UI
+      // shows the estimate for the wider list through backfill_estimate before a history read.
+      const added = conversations.filter((c) => !before.includes(c));
+      if (added.length > 0) {
+        const port = requireConnect(ctx);
+        const dataset = r.dataset === DOCUMENTS_DATASET ? DOCUMENTS_DATASET : MESSAGES_DATASET;
+        const account = await viaConnect(() => port.account(String(r.account), dataset));
+        if (!account) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
+        if (dataset === DOCUMENTS_DATASET) {
+          const taken = takenCollections(ctx.db, String(r.account), i.id);
+          const twice = added.find((c) => taken.has(c));
+          if (twice !== undefined) throw new TbError("collection_taken", `another source already reads the collection "${twice.slice(0, 80)}" of this account`, 409);
+        }
+        const known = new Set(account.conversations.map((c) => c.id));
+        const unknown = added.find((c) => !known.has(c));
+        if (unknown !== undefined) throw new TbError("conversation_unknown", `the account has no conversation "${unknown.slice(0, 80)}"`, 400);
+      }
       // a FULL new exclude (both lists) replaces whatever is stored, also a damaged value; a partial one needs the stored one
       const full = i.exclude?.senders !== undefined && i.exclude?.domains !== undefined;
       const oldEx = full ? { senders: [], domains: [] } : excludeOf(r);
@@ -268,6 +341,11 @@ export const handlers = {
         ctx.db
           .prepare("UPDATE obs_sources SET label = ?, conversations_json = ?, exclude_json = ?, live_interval_s = ?, retention_days = ?, updated_at = ? WHERE id = ?")
           .run(label, JSON.stringify(conversations), JSON.stringify(exclude), i.liveIntervalS ?? Number(r.live_interval_s), retention, now(), i.id);
+        // documents: a changed collection list restarts the scan from the start (a mid-scan cursor is cheap to lose, and the new list
+        // may make the old position meaningless)
+        if (r.dataset === DOCUMENTS_DATASET && (conversations.length !== before.length || conversations.some((c) => !before.includes(c)))) {
+          ctx.db.prepare("UPDATE obs_jobs SET cursor = NULL, same_cursor_count = 0, updated_at = ? WHERE source_id = ? AND kind = 'live'").run(now(), i.id);
+        }
         // narrowing applies at once: stored messages the source may no longer hold go now.
         dropOutOfScope(
           ctx.db,
@@ -290,7 +368,15 @@ export const handlers = {
     },
     async run(i, ctx) {
       needSource(ctx.db, i.id);
-      const { messagesPurged } = removeSource(ctx.db, i.id, now());
+      const { messagesPurged, sdkJobs } = removeSource(ctx.db, i.id, now());
+      const jobs = jobsOf(ctx);
+      for (const id of sdkJobs) {
+        try {
+          jobs?.cancel(id);
+        } catch {
+          // already finished: nothing runs; a tick that still runs finds its job gone and ends
+        }
+      }
       ctx.statusChanged();
       return { removed: true, messagesPurged };
     },
@@ -314,9 +400,24 @@ export const handlers = {
     async run(i, ctx) {
       const r = jobRow(ctx.db, i.id);
       if (!r) throw notFound("job");
-      const { row, changed } = transitionJob(ctx.db, r, i.action, callerKey(ctx), now());
-      if (changed) ctx.statusChanged();
-      return { job: jobView(row) };
+      // Try again on a LIVE job whose cursor Connect refused: never from Connect's start (that would import what came before
+      // the source). A fresh anchor first, the job continues from it, and its note says which span may be missing.
+      // A documents source reads its collections again from Connect's start instead (a document read twice is unchanged).
+      let reanchor: { anchor: string | null; at: number; fromStart?: boolean } | undefined;
+      if (i.action === "resume" && r.state === "failed" && r.kind === "live" && r.error_code === "cursor_invalid") {
+        const src = needSource(ctx.db, String(r.source_id));
+        if (src.dataset === DOCUMENTS_DATASET) reanchor = { anchor: null, at: now(), fromStart: true };
+        else {
+          const anchor = await captureAnchor(requireConnect(ctx), String(src.account), "forward");
+          reanchor = { anchor, at: now() };
+        }
+      }
+      const { row, changed } = transitionJob(ctx.db, r, i.action, callerKey(ctx), now(), reanchor);
+      if (changed) {
+        syncSdkJob(jobsOf(ctx), ctx.db, String(row.id));
+        ctx.statusChanged();
+      }
+      return { job: jobView(jobRow(ctx.db, String(row.id)) ?? row) };
     },
   }),
   [OP.backfillEstimate]: op<BackfillEstimateInput, unknown>({
@@ -326,15 +427,19 @@ export const handlers = {
       const since = parseDate(i.since, "since");
       const until = i.until !== undefined ? parseDate(i.until, "until") : null;
       if (until !== null && until <= since) throw new TbError("range_invalid", "until must be after since", 400);
-      return port.estimate({ account: String(r.account), conversations: conversationsOf(r), since, until });
+      const dataset = r.dataset === DOCUMENTS_DATASET ? DOCUMENTS_DATASET : MESSAGES_DATASET;
+      return viaConnect(() => port.estimate({ account: String(r.account), conversations: conversationsOf(r), since, until, dataset }));
     },
   }),
   [OP.backfillStart]: op<BackfillStartInput, unknown>({
     redact: (i) => `read history of ${i.source}`,
     async run(i, ctx) {
-      requireConnect(ctx);
+      const port = requireConnect(ctx);
       const r = needSource(ctx.db, i.source);
-      if (Number(r.history_capable) !== 1) throw new TbError("history_unsupported", "this source cannot read history (live only)", 409);
+      // a documents source reads every document of its collections when it starts: a history read has nothing more to read
+      if (r.dataset === DOCUMENTS_DATASET) throw new TbError("history_not_needed", DOCUMENTS_NO_HISTORY, 409);
+      // a source without history (Telegram bots, every provider of Connect 0.6.0) still has what Connect kept: it is read forward
+      const history = Number(r.history_capable) === 1;
       const t = now();
       const since = parseDate(i.since, "since");
       const until = i.until !== undefined ? parseDate(i.until, "until") : null;
@@ -343,10 +448,16 @@ export const handlers = {
       if (since < oldest.getTime()) throw new TbError("since_too_old", `history can reach back at most ${BACKFILL_MAX_YEARS} years`, 400);
       if (until !== null && until <= since) throw new TbError("range_invalid", "until must be after since", 400);
       if (activeBackfill(ctx.db, i.source)) throw new TbError("backfill_active", "this source already has a history job; cancel it first", 409);
-      // TODO(S2): capture the anchor BEFORE the job starts (no gap, no double) from Connect.
-      const job = createBackfill(ctx.db, i.source, { since, until, maxMessages: i.maxMessages ?? BACKFILL_DEFAULT_MAX_MESSAGES }, t);
+      if (since >= t) throw new TbError("since_in_future", "since must be in the past", 400);
+      // the anchor BEFORE the job exists: the history read ends at this moment (what comes later is the live job's), so there
+      // is no gap; an overlap with the live job is harmless (UNIQUE per message)
+      const anchor = await captureAnchor(port, String(r.account), history ? "backward" : "forward");
+      const anchorAt = now();
+      const end = anchorAt + BACKFILL_UNTIL_MARGIN_MS;
+      const job = createBackfill(ctx.db, i.source, { since, until: until === null ? end : Math.min(until, end), maxMessages: i.maxMessages ?? BACKFILL_DEFAULT_MAX_MESSAGES, anchor, anchorAt }, anchorAt);
+      syncSdkJob(jobsOf(ctx), ctx.db, String(job.id));
       ctx.statusChanged();
-      return { job: jobView(job) };
+      return { job: jobView(jobRow(ctx.db, String(job.id)) ?? job) };
     },
   }),
 
@@ -399,6 +510,8 @@ export const handlers = {
       if (!r) throw notFound("record");
       // every guard (secret, state, destination, keep, text, held) lives in decideRecord
       decideRecord(ctx.db, r, { decision: i.decision, destination: i.destination, acknowledged: i.acknowledged, revision: i.revision, input: i }, callerKey(ctx), now(), getPrivacy(ctx.db).textRetentionDays);
+      // the outbox drain sends it (S4); make sure it runs
+      ensureDrainJob(jobsOf(ctx));
       ctx.statusChanged();
       const row = recordRow(ctx.db, i.recordId);
       if (!row) throw notFound("record");
@@ -438,8 +551,45 @@ export const handlers = {
     async run(i, ctx) {
       const r = deliveryRow(ctx.db, i.id);
       if (!r) throw notFound("delivery");
-      // S1: the row changes (failed → pending); S4 sends it with the stored key
-      return { delivery: retryDelivery(ctx.db, r, now()) };
+      // the row changes (failed → pending); the outbox drain sends it with the stored key and the stored call
+      const delivery = ctx.db.transaction(() => {
+        const out = retryDelivery(ctx.db, r, now());
+        // a document a person edited in Knowledge: the owner resets it. The link is forgotten, so the next send makes a NEW document
+        // from this version and the edited one stays as the person left it
+        if (r.last_error === HUMAN_EDITED && r.target_key) ctx.db.prepare("DELETE FROM obs_targets WHERE key = ? AND destination = 'knowledge'").run(String(r.target_key));
+        return out;
+      });
+      ensureDrainJob(jobsOf(ctx));
+      return { delivery };
+    },
+  }),
+  [OP.deliveryTargetGet]: op<DeliveryTargetGetInput, unknown>({
+    async run(_i, ctx) {
+      const area = chosenArea(ctx.db);
+      const counts = deliveryCounts(ctx.db);
+      if (!companionTargets(ctx).includes(KNOWLEDGE)) return { area, effectiveArea: area, areas: [], knowledgeMissing: true, error: null, counts };
+      try {
+        const areas = await knowledgeAreas(ctx.callApp as never);
+        return { area, effectiveArea: area ?? defaultArea(areas), areas, knowledgeMissing: false, error: null, counts };
+      } catch (e) {
+        // Knowledge's own words never reach the page: a fixed sentence with its code
+        const code = e instanceof TbError ? e.code.slice(0, 60) : "error";
+        return { area, effectiveArea: area, areas: [], knowledgeMissing: false, error: `Observer could not list the Knowledge areas (${code}).`, counts };
+      }
+    },
+  }),
+  [OP.deliveryTargetSet]: op<DeliveryTargetSetInput, unknown>({
+    redact: (i) => `deliver to ${i.area ?? "the company area"}`,
+    async run(i, ctx) {
+      if (i.area !== null) {
+        if (!companionTargets(ctx).includes(KNOWLEDGE)) throw new TbError("knowledge_unavailable", KNOWLEDGE_MISSING, 409);
+        const areas = await knowledgeAreas(ctx.callApp as never).catch(() => {
+          throw new TbError("knowledge_failed", "Observer could not list the Knowledge areas. Try again later.", 502);
+        });
+        if (!areas.some((a) => a.id === i.area)) throw new TbError("area_unknown", "Knowledge does not show Observer this area", 404);
+      }
+      setChosenArea(ctx.db, i.area, now());
+      return { area: chosenArea(ctx.db) };
     },
   }),
 
@@ -479,16 +629,26 @@ export const definition: SdkAppDefinition = {
     ensureRuleZero(ctx.db, now());
     // the HMAC key for message digests (digest.ts): a failure is logged and shown as attention, it does not stop the start
     await setupDigestKey(ctx, now());
+    // L6: a restart never strands a job; every active Observer job gets its SDK job back
+    reconcileJobs(jobsOf(ctx), ctx.db, now());
+    // S4: the outbox drain runs for the app's lifetime
+    ensureDrainJob(jobsOf(ctx));
   },
-  // The owner must act when the digest key is gone or the secret store failed (digest.ts); S2 adds failed jobs.
-  async attention() {
-    return digestAttention();
+  // The SDK drains the running ticks after this; Observer has no timers of its own.
+  async onStop() {
+    bindDb(null);
+  },
+  // The owner must act when the digest key is gone or the secret store failed (digest.ts), or when a job failed (L3).
+  // TODO(S4): one Inbox item per failed job (R5).
+  async attention(db) {
+    return digestAttention() ?? jobsAttention(db);
   },
   // Records waiting in Review (C86): canvas badge and the count of things that need the owner.
   async pendingCount(db) {
     return pendingCount(db);
   },
-  // TODO(S2): `jobs` (SDK job runner, R1) and `attention` (failed jobs: one Inbox item).
+  // The ingest jobs on the SDK runner (src/jobs.ts): one kind per Observer job kind, input { job: <obs job id> }.
+  jobs: { [LIVE_KIND]: jobSpec, [BACKFILL_KIND]: jobSpec, [DELIVER_KIND]: deliverJob },
 };
 
 export const app = defineApp(definition);

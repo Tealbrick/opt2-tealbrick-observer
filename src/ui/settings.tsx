@@ -23,7 +23,7 @@ export function SettingsPage() {
       <PageHead title="Settings" lede="What Observer is connected to, and what it does with secrets and personal data." />
       {data.error ? <LoadFailed message={data.error} retrying={data.loading} onRetry={() => void data.reload()} /> : null}
       <Notice tone="neutral" role="status">
-        Delivery to Knowledge, Task Board and Inbox starts in a later version.
+        Observer delivers to Knowledge. Delivery to Task Board and Inbox starts in a later version.
       </Notice>
       <RequiredApps targets={d?.targets ?? null} />
       <div className="cards">

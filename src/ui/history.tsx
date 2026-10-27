@@ -2,7 +2,7 @@
 // last step of "Add source" and by "Read history…" on a source card.
 import { Button, Dialog, Field, TextInput } from "@opt2-tealbrick/ui";
 import { useEffect, useState } from "react";
-import { count, type Out, run, type Source } from "./api.ts";
+import { count, keptSentence, type Out, run, type Source } from "./api.ts";
 import { Failure, useAct } from "./common.tsx";
 
 const DAY = 86_400_000;
@@ -56,10 +56,12 @@ export function useHistory(sourceId: string | null) {
   };
 }
 
-export function HistoryFields({ h }: { h: ReturnType<typeof useHistory> }) {
+/** `keptDays`: the source has no history of its own (Connect keeps this many days; null = it does not say); undefined = it has. */
+export function HistoryFields({ h, keptDays }: { h: ReturnType<typeof useHistory>; keptDays?: number | null }) {
+  const reach = keptDays === undefined ? "History reaches back three years at most." : keptDays === null ? "Connect has only what it kept: older messages cannot be read." : `Connect keeps messages for up to ${keptDays} days: older ones cannot be read.`;
   return (
     <div className="tb-stack">
-      <Field label="Read messages since" hint="Write the day as YYYY-MM-DD. History reaches back three years at most. Observer reads it in the background. You can pause or stop it." error={h.valid ? undefined : "Write a date as YYYY-MM-DD, within the last three years."}>
+      <Field label="Read messages since" hint={`Write the day as YYYY-MM-DD. ${reach} Observer reads it in the background. You can pause or stop it.`} error={h.valid ? undefined : "Write a date as YYYY-MM-DD, within the last three years."}>
         <TextInput name="since" inputMode="numeric" placeholder="YYYY-MM-DD" autoComplete="off" value={h.since} onChange={(e) => h.setSince(e.target.value.trim())} />
       </Field>
       <div className="tb-ctas">
@@ -78,6 +80,7 @@ export function HistoryFields({ h }: { h: ReturnType<typeof useHistory> }) {
 
 /** "Read history…" on a source card. */
 export function HistoryDialog({ source, onClose, onStarted }: { source: Source | null; onClose: () => void; onStarted: () => void }) {
+  const kept = source && source.historyCapable === false ? (source.keptDays ?? null) : undefined;
   const h = useHistory(source?.id ?? null);
   const go = async () => {
     if (await h.start()) {
@@ -99,7 +102,8 @@ export function HistoryDialog({ source, onClose, onStarted }: { source: Source |
       }
     >
       <Failure message={h.error} />
-      <HistoryFields h={h} />
+      {kept !== undefined ? <p className="tb-soft">{keptSentence(kept)}</p> : null}
+      <HistoryFields h={h} keptDays={kept} />
     </Dialog>
   );
 }

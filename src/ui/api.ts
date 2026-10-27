@@ -17,7 +17,14 @@ export interface Source {
   conversations: string[];
   live: { state: string; lastReadAt: string | null; nextAt: string | null };
   history: { state: string; done: number; total: number | null; since: string | null };
+  /** Connect can page further back than what it kept */
+  historyCapable: boolean;
+  /** days Connect keeps the account's messages (null: it did not say) */
+  keptDays: number | null;
+  /** messages: chat conversations; documents: collections of documents (`conversations` holds the collections) */
+  dataset: Dataset;
 }
+export type Dataset = "messages" | "documents";
 export type Job = Out<"jobs_list">["jobs"][number];
 export interface RecordSummary {
   id: string;
@@ -31,6 +38,8 @@ export interface RecordSummary {
   secret: boolean;
   /** a token in the text looks like a secret (suspect_secret): held for the owner */
   possibleSecret: boolean;
+  /** routing_failed: Observer could not sort the record; held for the owner, text opens hidden (NOT a possible secret) */
+  problem?: string | null;
   ruleId: string | null;
   actionable: boolean;
   decidedBy: string | null;
@@ -104,9 +113,29 @@ export interface ConnectAccount {
   id: string;
   kind: string;
   label: string;
+  /** the dataset `conversations` belong to (documents: they are collections) */
+  dataset: Dataset;
+  /** every dataset of the account Observer can read */
+  datasets: Dataset[];
+  /** false: Connect cannot page further back than what it kept (every source of Connect 0.6.0) */
   historyCapable: boolean;
+  /** how many days Connect keeps what it received; null when it does not say */
+  retentionDays: number | null;
   conversations: ConnectConversation[];
 }
+
+/** What widening a source's conversations does not bring by itself (source_update; the edit page shows it). */
+export const WIDEN_NOTE = "Messages of the new conversations from before today come only with a history read.";
+
+/** What a source without history reads (the agreed sentence). */
+/** What a documents source reads (no history step). */
+export const DOCUMENTS_SENTENCE = "Observer reads every document of the chosen collections when you press Start live, then follows their changes.";
+export const datasetName = (d: Dataset): string => (d === "documents" ? "Documents" : "Messages");
+/** the unit a source picks: conversations (messages) or collections (documents) */
+export const unitName = (d: Dataset, many = false): string => (d === "documents" ? (many ? "collections" : "collection") : many ? "conversations" : "conversation");
+
+export const keptSentence = (days: number | null): string =>
+  `Observer reads from the time you share it, plus what Connect kept${days === null ? "" : ` (up to ${days} day${days === 1 ? "" : "s"})`}.`;
 
 // ── calls ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -122,6 +151,7 @@ const WRITE_OPS: ReadonlySet<string> = new Set([
   "rules_reorder",
   "review_decide",
   "delivery_retry",
+  "delivery_target_set",
   "privacy_set",
   "purge",
 ]);
@@ -163,12 +193,28 @@ export function explain(e: unknown): string {
       return "Give the source a name.";
     case "sources_limit":
       return "Observer holds no more sources. Remove one first.";
-    case "history_unsupported":
-      return "This source cannot read history. It reads only new messages.";
+    case "account_list_only":
+      return "Connect shares this account for its list only. Share it for reading in Connect, then try again.";
+    case "caller_unverified":
+      return "Connect could not verify that the caller is Observer, so it shared nothing. Ask the workspace owner to update Observer and Connect.";
+    case "no_access":
+      return "Connect refused Observer as a caller of its data operations.";
     case "since_too_old":
       return "History reaches back three years at most. Pick a later date.";
     case "range_invalid":
       return "The end date must be after the start date.";
+    case "since_in_future":
+      return "Pick a start date in the past.";
+    case "connect_failed":
+      return "Observer could not read from Connect. Try again later.";
+    case "connect_held":
+      return "Connect holds this read for your approval. Try again after you decide it.";
+    case "connect_busy":
+      return "Connect is busy. Try again in a minute.";
+    case "call_budget":
+      return "Observer is reading a lot from Connect right now. Try again in a minute.";
+    case "reanchor_required":
+      return "Observer needs Connect to restart this live job. Try again when Connect is available.";
     case "backfill_active":
       return "This source already has a history job. Stop it first.";
     case "job_state_invalid":
@@ -314,7 +360,10 @@ export const asAccount = (v: unknown): ConnectAccount => {
     id: String(a.id ?? ""),
     kind: String(a.kind ?? ""),
     label: String(a.label ?? a.id ?? ""),
+    dataset: a.dataset === "documents" ? "documents" : "messages",
+    datasets: Array.isArray(a.datasets) ? a.datasets.filter((d): d is Dataset => d === "messages" || d === "documents") : [],
     historyCapable: a.historyCapable !== false,
+    retentionDays: typeof a.retentionDays === "number" && Number.isInteger(a.retentionDays) && a.retentionDays >= 0 ? a.retentionDays : null,
     conversations: Array.isArray(a.conversations) ? a.conversations.map((c) => ({ id: String(c?.id ?? ""), title: String(c?.title ?? c?.id ?? ""), estimate: typeof c?.estimate === "number" ? c.estimate : null })) : [],
   };
 };

@@ -1,0 +1,191 @@
+{
+  "valid": [
+    {
+      "rows": [
+        {
+          "id": "m1",
+          "conversation": "c1",
+          "sentAt": "2026-10-17T10:00:00Z",
+          "author": {
+            "kind": "person",
+            "handle": "telegram:123456789",
+            "display": "Anna"
+          },
+          "text": "Hello",
+          "attachments": [],
+          "untrusted": true,
+          "truncated": false
+        },
+        {
+          "id": "m2",
+          "conversation": "c1",
+          "thread": "m1",
+          "sentAt": "2026-10-17T10:01:00Z",
+          "editedAt": "2026-10-17T10:02:00Z",
+          "author": {
+            "kind": "self",
+            "handle": "buzz:npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6"
+          },
+          "text": "Hi",
+          "attachments": [
+            {
+              "name": "a.pdf",
+              "mime": "application/pdf",
+              "bytes": 1024
+            }
+          ],
+          "untrusted": true
+        },
+        {
+          "id": "m3",
+          "conversation": "c1",
+          "sentAt": "2026-10-17T10:03:00Z",
+          "deleted": true,
+          "author": {
+            "kind": "person",
+            "handle": "telegram:123456789"
+          },
+          "text": "",
+          "attachments": [],
+          "untrusted": true
+        },
+        {
+          "id": "m4",
+          "conversation": "c2",
+          "sentAt": "2026-10-17T10:04:00.123Z",
+          "author": {
+            "kind": "bot",
+            "handle": "whatsapp:4219000000"
+          },
+          "text": "raw provider id for an unlisted channel",
+          "attachments": [],
+          "attachmentsTruncated": true,
+          "untrusted": true
+        }
+      ],
+      "nextCursor": "cur_2",
+      "exhausted": false
+    },
+    {
+      "rows": [],
+      "nextCursor": null,
+      "exhausted": true,
+      "retryAfterS": 30
+    }
+  ],
+  "invalid": [
+    {
+      "why": "untrusted not true",
+      "doc": {
+        "rows": [
+          {
+            "id": "m",
+            "conversation": "c",
+            "sentAt": "2026-10-17T10:00:00Z",
+            "author": {
+              "kind": "person",
+              "handle": "telegram:1"
+            },
+            "text": "x",
+            "attachments": [],
+            "untrusted": false
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "unknown author kind",
+      "doc": {
+        "rows": [
+          {
+            "id": "m",
+            "conversation": "c",
+            "sentAt": "2026-10-17T10:00:00Z",
+            "author": {
+              "kind": "admin",
+              "handle": "telegram:1"
+            },
+            "text": "x",
+            "attachments": [],
+            "untrusted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "exhausted missing",
+      "doc": {
+        "rows": [],
+        "nextCursor": null
+      }
+    },
+    {
+      "why": "deleted true with non-empty text",
+      "doc": {
+        "rows": [
+          {
+            "id": "m",
+            "conversation": "c",
+            "sentAt": "2026-10-17T10:00:00Z",
+            "deleted": true,
+            "author": {
+              "kind": "person",
+              "handle": "telegram:1"
+            },
+            "text": "still here",
+            "attachments": [],
+            "untrusted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "sentAt with a time zone offset",
+      "doc": {
+        "rows": [
+          {
+            "id": "m",
+            "conversation": "c",
+            "sentAt": "2026-10-17T10:00:00+02:00",
+            "author": {
+              "kind": "person",
+              "handle": "telegram:1"
+            },
+            "text": "x",
+            "attachments": [],
+            "untrusted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    },
+    {
+      "why": "handle without channel prefix",
+      "doc": {
+        "rows": [
+          {
+            "id": "m",
+            "conversation": "c",
+            "sentAt": "2026-10-17T10:00:00Z",
+            "author": {
+              "kind": "person",
+              "handle": "123456789"
+            },
+            "text": "x",
+            "attachments": [],
+            "untrusted": true
+          }
+        ],
+        "nextCursor": null,
+        "exhausted": true
+      }
+    }
+  ]
+}

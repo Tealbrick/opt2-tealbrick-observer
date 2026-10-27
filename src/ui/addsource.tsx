@@ -1,8 +1,9 @@
-// "Add source" StepFlow (C126): 1-Account, 2-Conversations (and who is never read), 3-Details, 4-History. The source is made on
+// "Add source" StepFlow (C126): 1-Account (and, when the account has both, messages or documents), 2-Conversations or Collections
+// (and who is never read), 3-Details, 4-History (messages only: a documents source reads everything of its collections at Start). The source is made on
 // Next of step 3 (source_add), with its live job paused: nothing is read until the owner presses Start live (DESIGN §3.2).
 import { Choices, Field, Notice, Select, StepFlow, Textarea, TextInput } from "@opt2-tealbrick/ui";
 import { useState } from "react";
-import { type ConnectAccount, count, everyLabel, kindName, plural, run } from "./api.ts";
+import { asAccount, type ConnectAccount, count, type Dataset, DOCUMENTS_SENTENCE, datasetName, everyLabel, keptSentence, kindName, plural, run, unitName } from "./api.ts";
 import { Check, Failure, useAct } from "./common.tsx";
 import { HistoryFields, useHistory } from "./history.tsx";
 
@@ -32,14 +33,31 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
   const [retention, setRetention] = useState("");
   const [created, setCreated] = useState<{ id: string } | null>(null);
   const make = useAct();
-  const account = accounts.find((a) => a.id === accountId) ?? null;
+  const load = useAct();
+  // the list names the accounts only; the conversations, history flag and kept days of the picked one come with ONE catalog read
+  const [details, setDetails] = useState<ConnectAccount | null>(null);
+  const account = details && details.id === accountId ? details : null;
   const history = useHistory(created?.id ?? null);
-  const canHistory = account?.historyCapable === true && account.kind !== "telegram";
+  // every source can read history: with `history` from Connect's catalog it reaches back further, without it Observer reads
+  // what Connect kept (kinds and capabilities come from Connect, not from a list of services)
+  const docs = account?.dataset === "documents";
+  const canHistory = account !== null && !docs;
+  const unit = unitName(account?.dataset ?? "messages");
+  const units = unitName(account?.dataset ?? "messages", true);
 
-  const chooseAccount = (id: string) => {
+  const chooseAccount = (id: string, dataset?: Dataset) => {
     setAccountId(id);
     setPicked([]);
-    setLabel(accounts.find((a) => a.id === id)?.label ?? "");
+    setDetails(null);
+    if (dataset === undefined) setLabel(accounts.find((a) => a.id === id)?.label ?? "");
+    void load.act(async () => {
+      const out = await run("sources_available", { account: id, ...(dataset ? { dataset } : {}) });
+      const found = out.accounts.map(asAccount).find((a) => a.id === id);
+      if (!found) throw Object.assign(new Error("not shared"), { code: "account_not_shared" });
+      setDetails(found);
+      // a documents source scans its collections again each time: slower by default, never faster than 5 minutes
+      setEvery(found.dataset === "documents" ? "900" : "60");
+    });
   };
   const toggle = (id: string, on: boolean) => setPicked((p) => (on ? [...p, id] : p.filter((x) => x !== id)));
 
@@ -49,6 +67,7 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
       const exclude = parseExclude(never);
       const out = await run("source_add", {
         account: account.id,
+        dataset: account.dataset,
         conversations: picked,
         label: label.trim(),
         ...(exclude.senders.length || exclude.domains.length ? { exclude } : {}),
@@ -85,26 +104,54 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
                 <Choices
                   label="Account"
                   value={accountId}
-                  onChange={chooseAccount}
-                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: `${kindName(a.kind)} · ${plural(a.conversations.length, "conversation")}`, ...(a.historyCapable ? {} : { note: "Reads new messages only: no history." }) }))}
+                  onChange={(id) => chooseAccount(id)}
+                  options={accounts.map((a) => ({ value: a.id, title: a.label, body: kindName(a.kind) }))}
                 />
               )}
+              <Failure message={load.error} />
+              {accountId && !account && !load.error ? (
+                <p className="tb-soft" role="status">
+                  Reading the account from Connect.
+                </p>
+              ) : null}
+              {account && account.datasets.length > 1 ? (
+                <Choices
+                  label="What should Observer read?"
+                  value={account.dataset}
+                  onChange={(d) => chooseAccount(account.id, d as Dataset)}
+                  options={account.datasets.map((d) => ({ value: d, title: datasetName(d), body: d === "documents" ? "Files, pages and table pages, one record per document." : "Chat messages, grouped by thread." }))}
+                />
+              ) : null}
+              {account ? (
+                <p className="tb-soft" role="status">
+                  {plural(account.conversations.length, unit, units)}.{docs ? ` ${DOCUMENTS_SENTENCE}` : account.historyCapable ? "" : ` ${keptSentence(account.retentionDays)}`}
+                </p>
+              ) : null}
             </div>
           ),
         },
         {
-          name: "Conversations",
+          name: docs ? "Collections" : "Conversations",
           canNext: picked.length > 0,
           render: () => (
             <div className="tb-stack">
-              <h3>Which conversations may Observer read?</h3>
-              <p className="tb-soft">Choose labels or channels, not everything. A whole mailbox includes private mail.</p>
+              <h3>Which {units} may Observer read?</h3>
+              <p className="tb-soft">{docs ? "Choose the folders or tables Observer needs, not everything." : "Choose labels or channels, not everything. A whole mailbox includes private mail."}</p>
               <div className="tb-checks">
                 {(account?.conversations ?? []).map((c) => (
-                  <Check key={c.id} checked={picked.includes(c.id)} onChange={(on) => toggle(c.id, on)} title={c.title} body={c.estimate === null ? "Connect cannot tell how many messages." : `About ${count(c.estimate)} messages.`} />
+                  <Check
+                    key={c.id}
+                    checked={picked.includes(c.id)}
+                    onChange={(on) => toggle(c.id, on)}
+                    title={c.title}
+                    body={c.estimate === null ? `Connect cannot tell how many ${docs ? "documents" : "messages"}.` : `About ${count(c.estimate)} ${docs ? "documents" : "messages"}.`}
+                  />
                 ))}
               </div>
-              <Field label="Never read messages from" hint="One address, handle or domain per line, for example doctor@clinic.example or @family.example. Their messages are never stored.">
+              <Field
+                label={docs ? "Never read documents by" : "Never read messages from"}
+                hint={`One address, handle or domain per line, for example doctor@clinic.example or @family.example. Their ${docs ? "documents" : "messages"} are never stored.`}
+              >
                 <Textarea rows={3} value={never} onChange={(e) => setNever(e.target.value)} />
               </Field>
             </div>
@@ -122,8 +169,8 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
               <Field label="Name">
                 <TextInput value={label} maxLength={80} onChange={(e) => setLabel(e.target.value)} />
               </Field>
-              <Field label="Look for new messages every" hint="Live watching stays off until you press Start live on the source.">
-                <Select value={every} onValueChange={setEvery} options={INTERVALS.map((s) => ({ value: String(s), label: everyLabel(s) }))} />
+              <Field label={docs ? "Look for changes every" : "Look for new messages every"} hint="Live watching stays off until you press Start live on the source.">
+                <Select value={every} onValueChange={setEvery} options={INTERVALS.filter((s) => !docs || s >= 300).map((s) => ({ value: String(s), label: everyLabel(s) }))} />
               </Field>
               <Field label="Keep message text" hint="After a record is delivered or dropped. Empty: the setting on the Privacy page.">
                 <Select value={retention} onValueChange={setRetention} options={RETENTION.map((d) => ({ value: d, label: d === "" ? "As on the Privacy page" : d === "1" ? "1 day" : `${d} days` }))} />
@@ -141,9 +188,11 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
           render: () => (
             <div className="tb-stack">
               <Failure message={history.error} />
-              <h3>Should Observer read older messages?</h3>
+              <h3>{docs ? "Ready" : "Should Observer read older messages?"}</h3>
               <p className="tb-soft">The source is added. Live watching is off until you press Start live on the source.</p>
-              {canHistory ? <HistoryFields h={history} /> : <p className="tb-soft">No history: this source gives Observer only messages sent from now on.</p>}
+              {docs ? <p className="tb-soft">{DOCUMENTS_SENTENCE}</p> : null}
+              {account && !account.historyCapable ? <p className="tb-soft">{keptSentence(account.retentionDays)}</p> : null}
+              {canHistory ? <HistoryFields h={history} keptDays={account?.historyCapable === false ? account.retentionDays : undefined} /> : null}
             </div>
           ),
         },

@@ -7,6 +7,7 @@ import { SECRET_MARKER } from "../src/classify.ts";
 import { digestOf } from "../src/digest.ts";
 import { CUT_MARKER, type IncomingMessage, MAX_TEXT_BYTES, sanitizeForStorage, storeMessage } from "../src/ingest.ts";
 import { fakeSecrets, migratedDb, start } from "./helpers.ts";
+import { scaling } from "./perf.ts";
 import { seedSource } from "./seed.ts";
 
 const rep = (s: string, n: number) => s.repeat(n);
@@ -76,11 +77,12 @@ describe("a secret never reaches obs_messages.text", () => {
     const short = sanitizeForStorage("short");
     assert.deepEqual(short, { text: "short", secrets: 0, cut: false });
   });
-  it("only the first 64K characters are read for secrets; a 1 MB message does not slow ingest down", () => {
-    const t = performance.now();
-    const s = sanitizeForStorage(`${rep("lorem ipsum ", 100_000)} ${SECRETS.ghp}`);
-    assert.ok(performance.now() - t < 200, `${performance.now() - t} ms`);
-    assert.equal(s.cut, true);
+  it("only the head of a long text is read for secrets: 1.2 MB costs about what 300 KB costs (load-robust, test/perf.ts)", () => {
+    const big = `${rep("lorem ipsum ", 100_000)} ${SECRETS.ghp}`;
+    assert.equal(sanitizeForStorage(big).cut, true);
+    // the detectors see at most 256 K characters of both: 4× the input must not cost ~4× (a full scan would)
+    const r = scaling(sanitizeForStorage, big.slice(0, big.length / 4), big, { ceilingMs: 1000, runs: 5, ratioLimit: 2.5 });
+    assert.ok(r.ok, r.why);
   });
 });
 

@@ -2,8 +2,8 @@
 // the real manifest must pass, a manifest that widens a companion or lets an agent read message content must fail.
 //
 // 1. Companions are pinned: exact operations and exact crud per product, no `delete` crud anywhere, no wildcard. Observer is
-//    read-only toward its sources "by construction": the only Connect companion (none yet) is exactly crud ["read"] and
-//    names only Connect's app-only read ops (data_*).
+//    read-only toward its sources "by construction": the one Connect companion is exactly crud ["read"] and names only
+//    Connect's app-only read ops (data_*); it is required (Observer reads nothing without it).
 // 2. Agent output is an ALLOW-LIST, not a deny-list: every op that is not exactly audience "person" is agent-reachable and
 //    must be one of the 3 known agent ops; their output schemas may use only a small keyword set (closed objects, bounded
 //    strings, bounded integers, booleans, enums, null unions) and every property path must be in AGENT_OUTPUT_ALLOW. A new
@@ -49,10 +49,11 @@ export const PINNED_COMPANIONS: Readonly<Record<string, { operations: readonly s
   inbox: { operations: ["inbox_ask", "inbox_status"], crud: ["read", "create"] },
 };
 
-/** Exact operations and crud per companion, no `delete` crud anywhere, no wildcard, no unknown product. Connect is optional
+/** Exact operations and crud per companion, no `delete` crud anywhere, no wildcard, no unknown product. Connect is required
  *  and checked by connectCompanionProblems (read only, data_* ops). */
 export function companionProblems(m: ManifestLike, pinned: typeof PINNED_COMPANIONS = PINNED_COMPANIONS): string[] {
   const out = [...connectCompanionProblems(m)];
+  if (!(m.companions ?? []).some((c) => c.product === CONNECT_PRODUCT)) out.push('companion "connect" is missing');
   const seen = new Set<string>();
   for (const c of m.companions ?? []) {
     if ((c.crud ?? []).includes("delete")) out.push(`companion "${c.product}" has delete crud`);
