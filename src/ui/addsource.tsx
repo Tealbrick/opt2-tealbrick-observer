@@ -55,6 +55,8 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
       const found = out.accounts.map(asAccount).find((a) => a.id === id);
       if (!found) throw Object.assign(new Error("not shared"), { code: "account_not_shared" });
       setDetails(found);
+      // a documents source scans its collections again each time: slower by default, never faster than 5 minutes
+      setEvery(found.dataset === "documents" ? "900" : "60");
     });
   };
   const toggle = (id: string, on: boolean) => setPicked((p) => (on ? [...p, id] : p.filter((x) => x !== id)));
@@ -167,8 +169,8 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
               <Field label="Name">
                 <TextInput value={label} maxLength={80} onChange={(e) => setLabel(e.target.value)} />
               </Field>
-              <Field label="Look for new messages every" hint="Live watching stays off until you press Start live on the source.">
-                <Select value={every} onValueChange={setEvery} options={INTERVALS.map((s) => ({ value: String(s), label: everyLabel(s) }))} />
+              <Field label={docs ? "Look for changes every" : "Look for new messages every"} hint="Live watching stays off until you press Start live on the source.">
+                <Select value={every} onValueChange={setEvery} options={INTERVALS.filter((s) => !docs || s >= 300).map((s) => ({ value: String(s), label: everyLabel(s) }))} />
               </Field>
               <Field label="Keep message text" hint="After a record is delivered or dropped. Empty: the setting on the Privacy page.">
                 <Select value={retention} onValueChange={setRetention} options={RETENTION.map((d) => ({ value: d, label: d === "" ? "As on the Privacy page" : d === "1" ? "1 day" : `${d} days` }))} />

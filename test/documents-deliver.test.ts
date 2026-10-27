@@ -21,7 +21,7 @@ import {
   tagsFor,
 } from "../src/deliver.ts";
 import { chunkId, chunkText } from "../src/documents.ts";
-import { CallBudget, runTick, sharedBudget, type TickDeps } from "../src/jobs.ts";
+import { CallBudget, DOC_MIN_INTERVAL_MS, runTick, sharedBudget, type TickDeps } from "../src/jobs.ts";
 import { setPrivacy } from "../src/store.ts";
 import { FakeConnect } from "./fake-connect.ts";
 import { FakeKnowledge } from "./fake-knowledge.ts";
@@ -31,6 +31,8 @@ type Out = Record<string, any>;
 const run = async (opId: keyof typeof handlers, input: unknown, ctx: OpContext): Promise<Out> => (await handlers[opId].run(input as never, ctx)) as Out;
 const T0 = Date.UTC(2026, 9, 27, 9, 0, 0);
 const MIN = 60_000;
+/** a documents scan never runs more often than this (jobs.ts DOC_MIN_INTERVAL_MS) */
+const SCAN = DOC_MIN_INTERVAL_MS;
 const ACME = "acc_acme_mcp";
 
 let db: Db;
@@ -53,7 +55,7 @@ function drain(over: Partial<DrainDeps> = {}): DrainDeps {
   return { db, callApp: callApp as never, targets: () => targets, write: (fn) => db.transaction(() => fn(db)), random: () => 0.5, ...over };
 }
 async function addDocs(input: Out = {}): Promise<{ source: string; live: string }> {
-  const out = await run("source_add", { account: ACME, dataset: "documents", conversations: ["finance"], label: "Acme drive", ...input }, owner());
+  const out = await run("source_add", { account: ACME, dataset: "documents", conversations: ["finance"], label: "Acme drive", liveIntervalS: 300, ...input }, owner());
   const live = String(one("SELECT id FROM obs_jobs WHERE source_id = ? AND kind = 'live'", out.source.id).id);
   await run("job_control", { id: live, action: "start" }, owner());
   return { source: out.source.id, live };
@@ -137,7 +139,7 @@ describe("documents ingest: one record per document", () => {
     put("d1", "Q3 board memo: revenue grew.");
     put("d2", "Invoice reminder for anna.novak@example.com", { author: { handle: "email:cfo@example.com" } });
     connect.putDoc(ACME, { collection: "orders", id: "o1", title: "not chosen", text: "x", updatedAt: now });
-    assert.deepEqual(await runTick(live, tick()), { status: "again", afterMs: 60_000 });
+    assert.deepEqual(await runTick(live, tick()), { status: "again", afterMs: SCAN });
     assert.deepEqual(
       all("SELECT doc_id, rev, deleted FROM obs_documents WHERE source_id = ? ORDER BY doc_id", source),
       [
@@ -152,11 +154,12 @@ describe("documents ingest: one record per document", () => {
     assert.deepEqual(JSON.parse(recordOf(source, "d2").pii_json), { email: 1 }, "PII found");
     const job = one("SELECT state, cursor, read_count, record_count, skipped_count FROM obs_jobs WHERE id = ?", live);
     assert.deepEqual([job.state, job.read_count, job.record_count, job.skipped_count], ["waiting", 2, 2, 0]);
-    assert.ok(typeof job.cursor === "string");
-    // the next tick pulls from the stored cursor: nothing new, nothing doubled
-    now += MIN;
+    assert.equal(job.cursor, null, "a documents scan ends with NO stored cursor: the next run scans again from the start");
+    // the next run scans from the start again: the revisions Observer has are skipped, nothing is doubled
+    now += SCAN;
     await runTick(live, tick());
-    assert.equal(connect.calls.at(-1)?.input.cursor, job.cursor);
+    assert.equal(connect.calls.at(-1)?.input.cursor, undefined);
+    assert.equal(connect.calls.at(-1)?.input.collection, "finance", "a source of ONE collection asks for that collection only");
     assert.equal(count("SELECT COUNT(*) AS c FROM obs_records WHERE source_id = ?", source), 2);
   });
   it("a long document is chunked under the message cap into ONE record, in order (the joined text is the document)", async () => {
@@ -185,18 +188,18 @@ describe("documents ingest: one record per document", () => {
     const first = recordOf(source, "d1");
     // the same content again (Connect re-sends it after a restart from its start)
     db.prepare("UPDATE obs_jobs SET cursor = NULL WHERE id = ?").run(live);
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     assert.equal(recordOf(source, "d1").id, first.id, "the same rev is unchanged: no new record");
     // an older revision arriving late is ignored
     connect.putDoc(ACME, { collection: "finance", id: "d1", title: "Doc d1", text: "stale", updatedAt: T0 - 60 * MIN });
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     assert.equal(recordOf(source, "d1").id, first.id);
     // a newer revision: a new record; the old one (never delivered) is gone with its text
-    now += MIN;
+    now += SCAN;
     put("d1", "version two");
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     const second = recordOf(source, "d1");
     assert.notEqual(second.id, first.id);
@@ -209,7 +212,7 @@ describe("documents ingest: one record per document", () => {
     connect.putDoc(ACME, { collection: "finance", id: "d1", title: "Doc d1", text: "version three", updatedAt: Date.parse(String(one("SELECT updated_at FROM obs_documents WHERE doc_id = 'd1'").updated_at)) || now - MIN });
     db.prepare("UPDATE obs_documents SET updated_at = ? WHERE doc_id = 'd1'").run(now - MIN);
     connect.putDoc(ACME, { collection: "finance", id: "d1", title: "Doc d1", text: "version four", updatedAt: now - MIN });
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     assert.deepEqual(
       all("SELECT text FROM obs_messages WHERE source_id = ?", source).map((r) => r.text),
@@ -221,17 +224,17 @@ describe("documents ingest: one record per document", () => {
     put("d1", "one");
     put("d2", "two");
     await runTick(live, tick());
-    now += MIN;
+    now += SCAN;
     connect.deleteDoc(ACME, "finance", "d1", now);
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     assert.deepEqual(one("SELECT deleted, record_id FROM obs_documents WHERE doc_id = 'd1'"), { deleted: 1, record_id: null });
     assert.equal(count("SELECT COUNT(*) AS c FROM obs_messages WHERE source_id = ? AND conversation = 'finance' AND provider_msg_id LIKE 'd1#%'", source), 0);
     setPrivacy(db, { onSourceDelete: "keep" });
     const kept = recordOf(source, "d2").id;
-    now += MIN;
+    now += SCAN;
     connect.deleteDoc(ACME, "finance", "d2", now);
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     assert.deepEqual(one("SELECT deleted, record_id FROM obs_documents WHERE doc_id = 'd2'"), { deleted: 1, record_id: kept });
     assert.equal(one("SELECT text FROM obs_messages WHERE record_id = ?", kept).text, "two", "keep: the text stays until the retention");
@@ -259,7 +262,7 @@ describe("documents ingest: one record per document", () => {
     put("ok", "fine");
     await runTick(live, tick());
     assert.equal(one("SELECT skipped_count FROM obs_jobs WHERE id = ?", live).skipped_count, 1);
-    now += 2 * MIN;
+    now += 2 * SCAN;
     connect.rateLimit(90);
     assert.deepEqual(await runTick(live, tick()), { status: "again", afterMs: 90_000 });
     assert.deepEqual(one("SELECT state, retry_at, consecutive_failures FROM obs_jobs WHERE id = ?", live), { state: "waiting", retry_at: now + 90_000, consecutive_failures: 0 });
@@ -268,7 +271,7 @@ describe("documents ingest: one record per document", () => {
     const { source, live } = await addDocs();
     put("d1", "one");
     await runTick(live, tick());
-    now += 2 * MIN;
+    now += 2 * SCAN;
     connect.fail("data_pull", "cursor_invalid", 400);
     await runTick(live, tick());
     assert.equal(one("SELECT state FROM obs_jobs WHERE id = ?", live).state, "failed");
@@ -302,7 +305,7 @@ describe("deliveries to Knowledge", () => {
       title: "Doc memo",
       body: "Q3 board memo: MRR is 41,200 EUR.",
       summary: "From Acme drive (finance) through Observer. Path: Acme LLC/Finance/Q3 board memo. Original: https://drive.example.com/q3.",
-      tags: ["observer", "source:finance", "kind:report"],
+      tags: ["observer", "untrusted", "source:finance", "kind:report"],
       status: "published",
     });
     assert.equal(create?.key, delivery(rec).idem_key, "the stored idempotency key");
@@ -331,15 +334,15 @@ describe("deliveries to Knowledge", () => {
     assert.deepEqual(creates[0], creates[1], "the same op, input and key");
     assert.equal(knowledge.docs.size, 1, "one document");
     // the source changes the document: a new record, approved, UPDATES the same Knowledge document
-    now += MIN;
+    now += SCAN;
     put("memo", "second", { kind: "table", mime: "text/csv" });
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     const rec2 = await approve(source, "memo");
     assert.notEqual(rec2, rec);
     await drainOutbox(drain());
     const update = knowledge.calls.find((c) => c.op === "document_update");
-    assert.deepEqual(update?.input, { id: "doc_0001", title: "Doc memo", body: "second", summary: "From Acme drive (finance) through Observer.", tags: ["observer", "source:finance", "kind:table"], status: "published" });
+    assert.deepEqual(update?.input, { id: "doc_0001", expectedVersion: 1, title: "Doc memo", body: "second", summary: "From Acme drive (finance) through Observer.", tags: ["observer", "untrusted", "source:finance", "kind:table"], status: "published" });
     assert.equal(knowledge.docs.get("doc_0001")?.body, "second");
     assert.equal(knowledge.docs.size, 1);
     assert.equal(one("SELECT state FROM obs_records WHERE id = ?", rec).state, "delivered", "the old record stays as history");
@@ -354,7 +357,7 @@ describe("deliveries to Knowledge", () => {
     const input = knowledge.calls.find((c) => c.op === "document_create")?.input as Out;
     assert.equal(input.body, "Contact [email] or [phone] about invoice 77.");
     assert.ok(!JSON.stringify(input).includes("anna.novak"));
-    assert.deepEqual(input.tags, ["observer", "source:finance", "pii:email", "pii:phone"]);
+    assert.deepEqual(input.tags, ["observer", "untrusted", "source:finance", "pii:email", "pii:phone"]);
     assert.match(input.summary, /personal data redacted/);
     assert.equal(delivery(rec).status, "sent");
   });
@@ -369,7 +372,7 @@ describe("deliveries to Knowledge", () => {
     await drainOutbox(drain());
     const input = knowledge.calls.find((c) => c.op === "document_create")?.input as Out;
     assert.deepEqual([input.area, input.status, input.body], ["tables", "draft", "id,customer,total\n1,'=cmd,12\n2,[email],'-3"]);
-    assert.deepEqual(input.tags, ["observer", "source:orders", "pii:email", "kind:table"]);
+    assert.deepEqual(input.tags, ["observer", "untrusted", "source:orders", "pii:email", "kind:table"]);
     assert.equal(delivery(String(rec.id)).status, "sent");
   });
   it("a CSV table document: formula cells are escaped and it is tagged kind:table", () => {
@@ -433,7 +436,7 @@ describe("deliveries to Knowledge", () => {
     assert.equal(delivery(c).status, "sent");
     // Task Board is not a destination Observer sends to yet
     put("k", "w");
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     const rec = recordOf(source, "k");
     await run("review_decide", { recordId: rec.id, decision: "deliver", destination: "kanban" }, owner());
@@ -447,9 +450,9 @@ describe("deliveries to Knowledge", () => {
     await approve(source, "memo");
     await drainOutbox(drain());
     knowledge.docs.clear();
-    now += MIN;
+    now += SCAN;
     put("memo", "two");
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     const rec2 = await approve(source, "memo");
     await drainOutbox(drain());
@@ -458,7 +461,7 @@ describe("deliveries to Knowledge", () => {
     assert.deepEqual([delivery(rec2).status, delivery(rec2).target_ref], ["sent", "doc_0002"]);
     // text gone
     put("gone", "z");
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     const g = await approve(source, "gone");
     db.prepare("UPDATE obs_messages SET text = NULL WHERE record_id = ?").run(g);
@@ -471,7 +474,7 @@ describe("deliveries to Knowledge", () => {
     const live = String(one("SELECT id FROM obs_jobs WHERE source_id = ? AND kind = 'live'", out.source.id).id);
     await run("job_control", { id: live, action: "start" }, owner());
     connect.post("slack1", { conversation: "C1", id: "m1", text: "Escalation: order 1182 is late", sentAt: now + 1000, author: "slack:U0ANNA" });
-    now += MIN;
+    now += SCAN;
     await runTick(live, tick());
     now += 40 * MIN;
     await runTick(live, tick());

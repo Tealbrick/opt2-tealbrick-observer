@@ -5,6 +5,11 @@
 //  live      forward from the anchor captured at source_add; per tick it pulls pages until Connect says `exhausted`, then waits
 //            the source's live interval. After `cursor_invalid` it restarts from a FRESH anchor (job_control), never from
 //            Connect's start: that would import what came before the source
+//  documents a state SCAN (documents/1): the job reads pages from the start; the last page answers exhausted with nextCursor null and the
+//            stored cursor then goes back to NULL, so the next run (after the source's interval, at least DOC_MIN_INTERVAL_MS) scans
+//            again from the start (an unchanged `rev` is a cheap skip, documents.ts). The cursor is kept only MID-scan. A source that
+//            reads ONE collection asks Connect for that collection only. Rows that come with `retryAfterS` are stored first, then the
+//            job waits. A deletion arrives as a tombstone row (deleted: true), never as a missing row: there is no sweep
 //  backfill  history false: forward from Connect's start (what Connect kept), `since` .. `until` (= the anchor time at
 //            backfill_start + 5 min); history true: backward from Connect's newest row down to `since`, with the same end.
 //            Ends when exhausted or at `maxMessages` stored messages
@@ -33,7 +38,7 @@ import { storeDocument } from "./documents.ts";
 import { storeMessage } from "./ingest.ts";
 import { applyRouting } from "./pipeline.ts";
 import { attachWindow } from "./records.ts";
-import { jobRow, type Row, recordRow, sourceRow } from "./store.ts";
+import { conversationsOf, jobRow, type Row, recordRow, sourceRow } from "./store.ts";
 import { backfillWindows, liveWindows, type WindowMessage } from "./window.ts";
 
 export { CALLS_PER_MINUTE, LIVE_RESERVE } from "./budget.ts";
@@ -52,6 +57,13 @@ export const PAGE_LIMIT = 200;
 export const PAGES_PER_TICK = 25;
 /** a tick stops paging after this long; the SDK aborts a tick at 10 minutes */
 export const TICK_BUDGET_MS = 2 * 60_000;
+/** a documents scan reads every document through the MCP server / database: never faster than this, whatever the source says */
+export const DOC_MIN_INTERVAL_MS = 5 * 60_000;
+/** the default `liveIntervalS` of a documents source (a scan is not cheap) */
+export const DOC_DEFAULT_INTERVAL_S = 900;
+/** pages in a row that neither moved the cursor nor ended the read: the job fails (Connect loops) */
+export const STUCK_LIMIT = 3;
+export const STUCK_MESSAGE = "Connect keeps answering the same reading position without new data (cursor_stuck). Observer stopped this job: press Try again when Connect is fixed.";
 
 const ACTIVE = new Set(["queued", "running", "waiting"]);
 const SDK_ACTIVE = new Set(["queued", "running", "waiting"]);
@@ -174,9 +186,10 @@ const messageWriter =
     return { stored, skipped: 0, records: -1 };
   };
 
-/** documents/1 rows: storeDocument each, in its own savepoint (one record per document, routed at once). A document Observer
- *  cannot store (an error of its own pipeline) is skipped and counted, so one bad document never stalls the source; a missing
- *  digest key is not skipped (it would skip every document): it fails the page like any message. */
+/** documents/1 rows: storeDocument each, in its own savepoint (one record per document, routed at once). Only a DETERMINISTIC
+ *  validation refusal of Observer's own pipeline (a 4xx TbError about the row, e.g. a record that cannot be routed) skips the row
+ *  and counts it in `skipped`, so one bad document never stalls the source. Every other error (a full disk, a busy database, a
+ *  missing digest key, a bug) is rethrown: the page fails whole, nothing of it is kept, and the job retries it. */
 const documentWriter =
   (rows: DocumentRow[]): PageWriter =>
   (db, source, at) => {
@@ -189,16 +202,32 @@ const documentWriter =
         if (res.status === "inserted" || res.status === "updated" || res.status === "deleted") stored += 1;
         if ((res.status === "inserted" || res.status === "updated") && res.recordId !== null) records += 1;
       } catch (e) {
-        if (e instanceof TbError && e.code.startsWith("digest_key")) throw e;
+        if (!isRowRefusal(e)) throw e;
         skipped += 1;
       }
     }
     return { stored, skipped, records };
   };
 
+/** A refusal about the ROW itself: a TbError with a 4xx status (validation, state), never a digest-key, lease or job error. */
+function isRowRefusal(e: unknown): boolean {
+  if (!(e instanceof TbError)) return false;
+  if (e.code.startsWith("digest_key") || e.code === "job_lease_lost" || e.code === "job_not_active") return false;
+  return e.httpStatus >= 400 && e.httpStatus < 500;
+}
+
 /** Write one page: every row (messages: then their windows and records; documents: one record each), the cursor, the counts
  *  and the job's next state, in the ONE checkpoint transaction. */
-function commitPage(d: TickDeps, job: Row, write: PageWriter, skippedByConnect: number, nextCursor: string | null, next: { state: "running" | "waiting" | "done"; retryAt: number | null }, at: number): number {
+function commitPage(
+  d: TickDeps,
+  job: Row,
+  write: PageWriter,
+  skippedByConnect: number,
+  nextCursor: string | null,
+  next: { state: "running" | "waiting" | "done" | "failed"; retryAt: number | null },
+  at: number,
+  sameCursor: number,
+): number {
   const id = str(job.id);
   const source = str(job.source_id);
   return d.checkpoint({ cursor: nextCursor } as Json, (db) => {
@@ -208,9 +237,9 @@ function commitPage(d: TickDeps, job: Row, write: PageWriter, skippedByConnect: 
     const ok = db
       .prepare(
         `UPDATE obs_jobs SET cursor = ?, read_count = read_count + ?, skipped_count = skipped_count + ?, last_read_at = ?, consecutive_failures = 0,
-           last_error = NULL, error_code = NULL, retry_at = ?, state = ?, updated_at = ? WHERE id = ? AND state IN ('queued', 'running', 'waiting')`,
+           same_cursor_count = ?, last_error = ?, error_code = ?, retry_at = ?, state = ?, updated_at = ? WHERE id = ? AND state IN ('queued', 'running', 'waiting')`,
       )
-      .run(nextCursor, stored, skipped, at, next.retryAt, next.state, at, id).changes;
+      .run(nextCursor, stored, skipped, at, sameCursor, next.state === "failed" ? STUCK_MESSAGE : null, next.state === "failed" ? "cursor_stuck" : null, next.retryAt, next.state, at, id).changes;
     // paused or cancelled while the page was on its way: nothing of it is kept, the cursor stays (the next run re-reads it)
     if (ok === 0) throw new TbError("job_not_active", "the job was stopped while the page was read", 409);
     // live: an exhausted page is a caught-up point (a later restart's gap starts here)
@@ -310,33 +339,64 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     const docs = src.dataset === DOCUMENTS_DATASET;
     let page: Page | DocPage;
     try {
-      page = docs ? await d.port.pullDocuments({ account: q.account, cursor: q.cursor, limit: Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX), lane: q.lane ?? "live" }) : await d.port.pull(q);
+      // a source with ONE collection asks for that collection only (the cursor is bound to it); otherwise the whole account is
+      // scanned and the rows of other collections are dropped as out_of_scope
+      const only = docs ? conversationsOf(src) : [];
+      page = docs
+        ? await d.port.pullDocuments({ account: q.account, cursor: q.cursor, ...(only.length === 1 ? { collection: only[0] as string } : {}), limit: Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX), lane: q.lane ?? "live" })
+        : await d.port.pull(q);
     } catch (e) {
       return fail(d, jobRow(d.db, jobId) ?? job, e, clockNow());
     }
     const at = clockNow();
     const fresh = jobRow(d.db, jobId);
     if (!fresh || !ACTIVE.has(str(fresh.state))) return DONE; // stopped while the page was on its way: it is not stored
+    const interval = docs ? Math.max(DOC_MIN_INTERVAL_MS, Number(src.live_interval_s) * 1000) : Number(src.live_interval_s) * 1000;
+    // documents are a SCAN: at its end (exhausted) the cursor goes back to NULL and the next run scans again from the start; a
+    // mid-scan page keeps Connect's cursor. Messages keep their change-feed cursor (a forward page keeps it when exhausted, a
+    // backward one ends with null)
+    const nextCursor = docs ? (page.exhausted ? null : page.nextCursor) : (page.nextCursor ?? (q.direction === "forward" ? cursorOf(job) : null));
     if (page.retryAfterS !== null) {
       const ms = page.retryAfterS * 1000;
-      setState(d, fresh, "state = 'waiting', retry_at = ?", [at + ms], at);
+      if (!docs || (page.rows.length === 0 && page.invalid === 0 && page.quarantined === 0 && nextCursor === cursorOf(fresh))) {
+        setState(d, fresh, "state = 'waiting', retry_at = ?", [at + ms], at);
+        d.statusChanged?.();
+        return again(ms);
+      }
+      // documents: Connect's rows come WITH the wait (a 429 on a later list page): keep them and the cursor, then wait
+      try {
+        commitPage(d, fresh, documentWriter((page as DocPage).rows), page.invalid + page.quarantined, nextCursor, { state: "waiting", retryAt: at + ms }, at, 0);
+      } catch (e) {
+        if (e instanceof TbError && e.code === "job_not_active") return DONE;
+        return fail(d, fresh, e, at, "own");
+      }
       d.statusChanged?.();
       return again(ms);
     }
-    // a forward page keeps its cursor when exhausted (poll from it); a backward one ends with null
-    const nextCursor = page.nextCursor ?? (q.direction === "forward" ? cursorOf(job) : null);
     const finished = page.exhausted || (kind === "backfill" && page.nextCursor === null);
-    const interval = Number(src.live_interval_s) * 1000;
+    // a page that neither moved the cursor nor ended the read: counted; at STUCK_LIMIT the job fails visibly
+    const same = !finished && nextCursor === cursorOf(fresh) ? Number(fresh.same_cursor_count) + 1 : 0;
+    const stuck = same >= STUCK_LIMIT;
     // the job's next state is part of the page's transaction (the last page of a history read writes `done` with it)
-    const next = !finished ? { state: "running" as const, retryAt: null } : kind === "backfill" ? { state: "done" as const, retryAt: null } : { state: "waiting" as const, retryAt: at + interval };
+    const next = stuck
+      ? { state: "failed" as const, retryAt: null }
+      : !finished
+        ? { state: "running" as const, retryAt: null }
+        : kind === "backfill"
+          ? { state: "done" as const, retryAt: null }
+          : { state: "waiting" as const, retryAt: at + interval };
     try {
       const write = docs ? documentWriter((page as DocPage).rows) : messageWriter((page as Page).rows.map(toIncoming));
-      commitPage(d, fresh, write, page.invalid + page.quarantined, nextCursor, next, at);
+      commitPage(d, fresh, write, page.invalid + page.quarantined, nextCursor, next, at, same);
     } catch (e) {
       // nothing of the page was kept (one transaction); a lost lease is the SDK's (fail rethrows it), a stopped job just ends
       if (e instanceof TbError && e.code === "job_not_active") return DONE;
       // Connect's answer was fine: what failed is Observer's own (storing, windowing): never a permanent refusal
       return fail(d, fresh, e, at, "own");
+    }
+    if (stuck) {
+      d.statusChanged?.();
+      return DONE;
     }
     d.statusChanged?.();
     if (finished) return kind === "backfill" ? DONE : again(interval);

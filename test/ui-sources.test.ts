@@ -375,7 +375,7 @@ describe("Add source", () => {
     await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
     await next(dialog);
     await next(dialog, "Add source");
-    assert.deepEqual(lastCall("source_add").input, { account: "acc_acme", dataset: "documents", conversations: ["finance"], label: "Acme LLC mock sources", liveIntervalS: 60 });
+    assert.deepEqual(lastCall("source_add").input, { account: "acc_acme", dataset: "documents", conversations: ["finance"], label: "Acme LLC mock sources", liveIntervalS: 900 });
     assert.doesNotMatch(step(dialog, 3).textContent ?? "", /Estimate/, "no history read for documents");
     assert.match(step(dialog, 3).textContent ?? "", /Observer reads every document/);
     await m.unmount();

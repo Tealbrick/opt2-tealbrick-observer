@@ -3,7 +3,7 @@
 import type { Db } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { classifyRecord } from "./classify.ts";
-import { recordMetaFacts, scanRecord } from "./records.ts";
+import { recordMetaFacts, recordMetaPii, scanRecord } from "./records.ts";
 import { type Route, type RouteFacts, routeFacts } from "./router.ts";
 import { DAY_MS, decideRecord, getPrivacy, listRules, loadClassifierConfig, notFound, type Row, recordRow } from "./store.ts";
 
@@ -35,6 +35,8 @@ export function applyRouting(db: Db, recordId: string, now: number): { route: Ro
       facts.secret = true;
     }
     if (meta.suspect > 0) facts.classes.suspect_secret = Math.max(facts.classes.suspect_secret ?? 0, meta.suspect);
+    // a document's title, path, link and collection: personal data found only there counts like personal data in the text
+    for (const [c, n] of Object.entries(recordMetaPii(db, recordId, cfg))) facts.classes[c] = (facts.classes[c] ?? 0) + n;
     const hasText = !crossHit && texts.some((t) => t !== null);
     const secret = facts.secret || crossHit || Number(rec.secret) === 1;
     const rf: RouteFacts = {

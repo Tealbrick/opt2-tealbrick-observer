@@ -13,6 +13,13 @@
 // on a call without a cursor; a rate limit answers empty rows, the same cursor and `retryAfterS`; a stored row that does not
 // conform is quarantined (skipped, counted). Refusals keyed on the VERIFIED caller product: caller_unverified 403, not_found 404
 // (not shared), scope_denied 403 (catalog level only), cursor_invalid 400.
+//
+// The documents dataset has two models (`docMode`). `scan` (default) is the producer's (connect feat/c373-documents-dataset): a
+// state SCAN. Each document appears once with its latest state (a source deletion is a tombstone row, deleted: true, with a new
+// rev), in first-seen order; the cursor is the list position (bound to the account and to the `collection` filter); the LAST page
+// answers exhausted: true with nextCursor null, and to see changes a consumer scans again from the start; a 429 on a later page
+// answers rows WITH retryAfterS (`rateLimitWithRows`). `feed` is an append-only change feed that keeps its cursor when exhausted
+// (the way messages behave); Observer does not rely on it for documents, the second mode only proves it still ends right.
 import { readFileSync } from "node:fs";
 import { validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
@@ -109,7 +116,7 @@ export interface Post {
   broken?: boolean;
 }
 
-type Fault = { op: string; error: { code: string; status: number } } | { op: "data_pull"; retryAfterS: number };
+type Fault = { op: string; error: { code: string; status: number } } | { op: "data_pull"; retryAfterS: number; withRows?: boolean };
 
 const iso = (ms: number): string => new Date(ms).toISOString();
 const enc = (account: string, rev: number): string => Buffer.from(`fake:${account}:${rev}`).toString("base64url");
@@ -130,6 +137,10 @@ export class FakeConnect {
   onTheWire: ((out: Record<string, unknown>) => void) | null = null;
   /** how an edit or a deletion lands in the log (see the header) */
   changes: "inplace" | "append" = "inplace";
+  /** the documents model: `scan` (the producer's state scan) or `feed` (an append-only change feed); see the header */
+  docMode: "scan" | "feed" = "scan";
+  /** documents scan: rows per page, at most 50 (a test sets 2 to make a multi-page scan) */
+  docPageSize = 50;
   readonly #rev = new Map<string, number>();
 
   addAccount(a: Partial<FakeAccount> & { id: string }): FakeAccount {
@@ -223,6 +234,10 @@ export class FakeConnect {
   rateLimit(retryAfterS: number): void {
     this.faults.push({ op: "data_pull", retryAfterS });
   }
+  /** documents scan: the next data_pull answers its rows AND retryAfterS (a 429 on a later list page, after rows were read) */
+  rateLimitWithRows(retryAfterS: number): void {
+    this.faults.push({ op: "data_pull", retryAfterS, withRows: true });
+  }
   pulls(): number {
     return this.calls.filter((c) => c.op === "data_pull").length;
   }
@@ -244,7 +259,7 @@ export class FakeConnect {
         output = this.#catalog(i);
         break;
       case "data_pull":
-        output = this.#pull(i, fault && "retryAfterS" in fault ? fault.retryAfterS : null);
+        output = this.#pull(i, fault && "retryAfterS" in fault ? fault.retryAfterS : null, fault && "withRows" in fault && fault.withRows === true);
         break;
       default:
         throw new TbError("unknown_tool", `fake: no op ${op}`, 404);
@@ -365,7 +380,48 @@ export class FakeConnect {
     };
   }
 
-  /** documents: forward only, in seq order, at most 50 rows; the same cursor and envelope rules as messages */
+  /** documents, the producer's model: a state scan (see the header) */
+  #scanDocs(a: FakeAccount, i: Record<string, unknown>, retryAfterS: number | null, withRows: boolean): Record<string, unknown> {
+    const collection = typeof i.collection === "string" ? i.collection : null;
+    const cursor = typeof i.cursor === "string" ? i.cursor : null;
+    let offset = 0;
+    if (cursor !== null) {
+      const m = /^scan:([^:]+):(.*):(\d+)$/u.exec(Buffer.from(cursor, "base64url").toString("utf8"));
+      if (!m || m[1] !== a.id || m[2] !== (collection ?? "")) throw new TbError("cursor_invalid", "cursor is not one data_pull returned for this account, dataset and collection.", 400);
+      offset = Number(m[3]);
+    }
+    const enc2 = (n: number): string => Buffer.from(`scan:${a.id}:${collection ?? ""}:${n}`).toString("base64url");
+    const latest = new Map<string, DocLogRow>();
+    for (const r of this.docLogs.get(a.id) ?? []) latest.set(`${r.collection}\u0000${r.id}`, r);
+    const all = [...latest.values()].filter((r) => collection === null || r.collection === collection);
+    const limit = Math.max(1, Math.min(this.docPageSize, 50, typeof i.limit === "number" ? Math.trunc(i.limit) : 50));
+    let page: Record<string, unknown>;
+    if (retryAfterS !== null && !withRows) page = { rows: [], nextCursor: cursor, exhausted: false, retryAfterS };
+    else {
+      const taken = all.slice(offset, offset + limit);
+      const rows: Record<string, unknown>[] = [];
+      let quarantined = 0;
+      for (const r of taken) {
+        const row = this.#docRow(r);
+        if (r.broken || !validateAgainstSchema(DOC_ROW, row as Json).ok) quarantined += 1;
+        else rows.push(row);
+      }
+      const end = offset + taken.length >= all.length;
+      page = {
+        rows,
+        nextCursor: end && retryAfterS === null ? null : enc2(offset + taken.length),
+        exhausted: end && retryAfterS === null,
+        ...(retryAfterS !== null ? { retryAfterS } : {}),
+        ...(quarantined > 0 ? { quarantined } : {}),
+      };
+    }
+    this.drift?.(page);
+    const checked = validateAgainstSchema(DOC_PAGE, page as Json);
+    if (!checked.ok) throw new Error(`fake Connect drifted from documents/1: ${JSON.stringify(checked.errors.slice(0, 3))}`);
+    return { ...page, schema: "documents/1", untrusted: true };
+  }
+
+  /** documents, the `feed` model: forward only, in seq order, at most 50 rows; the same cursor and envelope rules as messages */
   #pullDocs(a: FakeAccount, i: Record<string, unknown>, retryAfterS: number | null): Record<string, unknown> {
     const cursor = typeof i.cursor === "string" ? i.cursor : null;
     const at = cursor === null ? null : this.#decode(cursor, a.id);
@@ -392,9 +448,9 @@ export class FakeConnect {
     return { ...page, schema: "documents/1", untrusted: true };
   }
 
-  #pull(i: Record<string, unknown>, retryAfterS: number | null): Record<string, unknown> {
+  #pull(i: Record<string, unknown>, retryAfterS: number | null, withRows = false): Record<string, unknown> {
     const a = this.#account(i.account, "shared");
-    if (i.dataset === "documents" && a.datasets.includes("documents")) return this.#pullDocs(a, i, retryAfterS);
+    if (i.dataset === "documents" && a.datasets.includes("documents")) return this.docMode === "scan" ? this.#scanDocs(a, i, retryAfterS, withRows) : this.#pullDocs(a, i, retryAfterS);
     if (i.dataset !== "messages") throw new TbError("not_found", "No such dataset on this account.", 404);
     const direction = i.direction === "backward" ? "backward" : "forward";
     const cursor = typeof i.cursor === "string" ? i.cursor : null;

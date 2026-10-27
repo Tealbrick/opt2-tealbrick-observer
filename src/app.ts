@@ -55,7 +55,7 @@ import { DOCUMENTS_DATASET, MESSAGES_DATASET } from "./contract.ts";
 import { chosenArea, DELIVER_KIND, defaultArea, deliverJob, deliveryCounts, ensureDrainJob, KNOWLEDGE, KNOWLEDGE_MISSING, knowledgeAreas, setChosenArea } from "./deliver.ts";
 import { invalidWordEntries } from "./detect/words.ts";
 import { digestAttention, setupDigestKey } from "./digest.ts";
-import { BACKFILL_KIND, jobSpec, jobsAttention, jobsOf, LIVE_KIND, reconcileJobs, syncSdkJob } from "./jobs.ts";
+import { BACKFILL_KIND, DOC_DEFAULT_INTERVAL_S, jobSpec, jobsAttention, jobsOf, LIVE_KIND, reconcileJobs, syncSdkJob } from "./jobs.ts";
 import { manifest, migrationsDir } from "./manifest.ts";
 import {
   activeBackfill,
@@ -293,7 +293,7 @@ export const handlers = {
           label,
           conversations,
           exclude: normalizeExclude(i.exclude ?? {}, { senders: [], domains: [] }),
-          liveIntervalS: i.liveIntervalS ?? 60,
+          liveIntervalS: i.liveIntervalS ?? (docs ? DOC_DEFAULT_INTERVAL_S : 60),
           retentionDays: i.retentionDays ?? null,
           historyCapable: account.historyCapable,
           keptDays: account.retentionDays,

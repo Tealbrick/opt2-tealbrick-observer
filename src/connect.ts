@@ -74,8 +74,9 @@ export interface ConnectPort {
   estimate(q: { account: string; conversations: string[]; since: number; until: number | null; dataset?: Dataset }): Promise<ConnectEstimate>;
   /** one page of the account's `messages` dataset (all conversations, in Connect's change order) */
   pull(q: PullQuery): Promise<Page>;
-  /** one page of the account's `documents` dataset (all collections, forward in Connect's change order, at most 50 rows) */
-  pullDocuments(q: { account: string; cursor: string | null; limit?: number; lane?: Lane }): Promise<DocPage>;
+  /** one page of the account's `documents` dataset: a state SCAN (the last page answers exhausted + nextCursor null; a consumer scans
+   *  again from the start to see changes), at most 50 rows. `collection` limits the scan to one collection (the cursor is bound to it) */
+  pullDocuments(q: { account: string; cursor: string | null; collection?: string; limit?: number; lane?: Lane }): Promise<DocPage>;
 }
 
 /** What the port needs from a context: an op handler ctx and a job ctx both have it. */
@@ -233,6 +234,7 @@ export function realPort(ctx: ConnectCtx, budget: CallBudget = sharedBudget): Co
     async pullDocuments(q) {
       const input: Record<string, unknown> = { account: q.account, dataset: DOCUMENTS_DATASET, direction: "forward", limit: Math.max(1, Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX)) };
       if (q.cursor !== null) input.cursor = q.cursor;
+      if (q.collection !== undefined) input.collection = q.collection;
       return readDocPage(await c("data_pull", input, q.lane ?? "live"));
     },
   };

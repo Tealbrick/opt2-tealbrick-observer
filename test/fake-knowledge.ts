@@ -88,9 +88,18 @@ export class FakeKnowledge {
     return { status: "ok", output };
   };
 
+  /** a person edits the document in Knowledge: a new version (Observer must not overwrite it) */
+  humanEdit(id: string, body: string): void {
+    const d = this.docs.get(id);
+    if (!d) throw new Error(`fake: no document ${id}`);
+    d.body = body;
+    d.version += 1;
+  }
+
   #check(i: Record<string, unknown>, allowed: string[]): void {
     for (const k of Object.keys(i)) if (!allowed.includes(k)) throw new TbError("input_invalid", `fake: unknown member ${k}`, 400);
     if (i.title !== undefined && (typeof i.title !== "string" || i.title.length < 1 || i.title.length > 200)) throw new TbError("input_invalid", "title", 400);
+    if (i.expectedVersion !== undefined && (typeof i.expectedVersion !== "number" || !Number.isInteger(i.expectedVersion) || i.expectedVersion < 1)) throw new TbError("input_invalid", "expectedVersion", 400);
     if (i.body !== undefined && (typeof i.body !== "string" || i.body.length > 500_000)) throw new TbError("input_invalid", "body", 400);
     if (i.summary !== undefined && (typeof i.summary !== "string" || i.summary.length > 2000)) throw new TbError("input_invalid", "summary", 400);
     if (i.status !== undefined && !["draft", "published", "archived"].includes(String(i.status))) throw new TbError("input_invalid", "status", 400);
@@ -117,6 +126,8 @@ export class FakeKnowledge {
     const d = typeof i.id === "string" ? this.docs.get(i.id) : undefined;
     if (!d) throw new TbError("not_found", "not found", 404);
     if (this.appWrites === "refused") throw new TbError("scope_denied", `no update access to area ${d.area}`, 403);
+    // Knowledge store.updateDocument: expectedVersion that is not the current version → version_conflict 409 (nothing changes)
+    if (i.expectedVersion !== undefined && i.expectedVersion !== d.version) throw new TbError("version_conflict", `document is at version ${d.version}`, 409);
     Object.assign(d, {
       ...(i.title !== undefined ? { title: i.title } : {}),
       ...(i.body !== undefined ? { body: i.body } : {}),

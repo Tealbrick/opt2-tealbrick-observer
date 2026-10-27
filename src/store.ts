@@ -181,7 +181,7 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
   db.transaction(() => {
     db.prepare(
       `UPDATE obs_jobs SET state = ?, paused_by = ?, updated_at = ?${
-        reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' AND kind = 'backfill' THEN NULL ELSE cursor END, consecutive_failures = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
+        reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' AND kind = 'backfill' THEN NULL ELSE cursor END, consecutive_failures = 0, same_cursor_count = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
       } WHERE id = ?`,
     ).run(next, pausedBy, now, str(r.id));
     if (liveReset && reanchor?.fromStart) {
@@ -400,7 +400,7 @@ export function isExcluded(key: string, ex: Exclude): boolean {
  * After messages of a record were deleted (narrowing) or their text purged: nothing of the removed text may survive in a
  * record, a delivery or a flag. Same transaction as the delete (the caller's).
  *  - unsent deliveries of the record are deleted (they would send the removed text), a sent one keeps its ledger row but its
- *    stored input is emptied (from S4 it holds the text that was sent)
+ *    stored input and its stored call (payload_json: the whole delivered body) are emptied
  *  - narrowing: a record left with no message is deleted with its deliveries and flags; a record that keeps some messages
  *    gets a new revision (its content changed) and goes back to Review if it was approved
  *  - in both modes the thread subject of a touched record is nulled
@@ -415,7 +415,10 @@ function scrubRecords(db: Db, recordIds: Iterable<string>, mode: "narrow" | "pur
       continue;
     }
     db.prepare("DELETE FROM obs_deliveries WHERE record_id = ? AND status <> 'sent'").run(id);
-    db.prepare("UPDATE obs_deliveries SET input_json = '{}', updated_at = ? WHERE record_id = ? AND status = 'sent'").run(now, id);
+    // a delivery that stays as ledger keeps no text: not the input, not the exact call that was stored for a retry (payload_json)
+    db.prepare("UPDATE obs_deliveries SET input_json = '{}', payload_json = NULL, updated_at = ? WHERE record_id = ?").run(now, id);
+    // the document's own metadata (path, link) can name people: it goes with the text
+    db.prepare("UPDATE obs_documents SET path = NULL, url = NULL WHERE record_id = ?").run(id);
     db.prepare(
       `UPDATE obs_records SET state = CASE WHEN state = 'approved' THEN 'review' ELSE state END,
          revision = revision + ?, thread = NULL, updated_at = ? WHERE id = ?`,
@@ -816,8 +819,10 @@ export function decideRecord(
 }
 
 /** A held (or any unsent) delivery row of a record that goes back to Review is marked superseded: it may still be approved in Holds, but it must never be sent. */
-export function supersedeHeld(db: Db, recordId: string): void {
-  db.prepare("UPDATE obs_deliveries SET superseded = 1 WHERE record_id = ? AND status IN ('held', 'pending')").run(recordId);
+export function supersedeHeld(db: Db, recordId: string, except = ""): void {
+  // the stored call (payload_json) holds the whole body: a row that will never be sent keeps none of it. `except`: a delivery that
+  // stays sendable (documents.ts retireRecord keeps an attempted document_create so its lost answer can be resolved)
+  db.prepare("UPDATE obs_deliveries SET superseded = 1, payload_json = NULL WHERE record_id = ? AND status IN ('held', 'pending') AND id <> ?").run(recordId, except);
 }
 
 /**

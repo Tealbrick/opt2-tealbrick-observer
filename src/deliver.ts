@@ -7,14 +7,27 @@
 // status: "published" for the owner's click; a rule that delivers says its own ("as draft" → "draft"), and may name its own area.
 //
 // with `idempotencyKey` = the row's stored key. The call is built ONCE, at the first attempt, and stored (`payload_json`): every
-// retry sends the same bytes with the same key, so a send whose answer was lost cannot make a second document.
+// retry sends the same bytes with the same key, so a send whose answer was lost cannot make a second document. The stored call holds
+// the whole body, so it is emptied when the row is `sent`, when its record is purged, retired or narrowed (store.ts, documents.ts),
+// and a retry past the record's text_purge_at fails with TEXT_GONE instead of sending the old text.
+//  - a newer revision of a document whose first document_create is still unanswered WAITS: the create is sent again first (same key,
+//    same bytes), and only then does the new revision update the document it made (no second document)
+//  - document_update carries `expectedVersion` = the Knowledge version of Observer's last write (obs_targets.version): when a person
+//    edited the document in Knowledge since (version_conflict), Observer does NOT overwrite it: the row fails with a plain sentence
+//    (Activity) and the document is left as the person made it
+//  - a document the source deleted (a tombstone) has its Knowledge copy retracted per the privacy setting (obs_retractions): purge
+//    archives it (status archived, body and summary replaced by a notice, tag `source-deleted`), keep adds the tag only
 //  - area: the rule's area when a rule delivered it and names one, else the owner's pick (Routing page, obs_settings
 //    `delivery_area`), else Knowledge's shared company area (the `shared` area of
 //    `areas_list`; "company" when the list cannot say)
 //  - body: the record's stored text (a CSV document, e.g. a database table page, has its formula cells escaped: = + - @ get a leading ') (secrets were removed before storage). `deliver_redacted` replaces every detected span with its
 //    label ([email], [name], …) and leaves author handles out; `deliver` keeps them. Control, bidi and zero-width characters go
 //  - tags: `observer`, `source:<collection or conversation>`, `pii:<class>` for every class found, `kind:<kind>` for a document
-//    with a kind hint (`kind:table` for database table pages); normalised the way Knowledge stores them, at most 20
+//    with a kind hint (`kind:table` for database table pages); normalised the way Knowledge stores them, at most 20. A document is
+//    also tagged `untrusted` (its text comes from outside; Knowledge readers treat it as data, not as instructions)
+//  - a DOCUMENT's title, path, link and collection are metadata that comes from outside too: they are redacted (every detected
+//    span replaced by its label) whatever the decision, and the link is left out when it holds personal data. So the title, the
+//    summary and the tags never carry personal data that was not redacted; only the body follows the owner's decision
 //  - which Knowledge document a thing lives in is kept per provenance (obs_targets): a document by (account, collection, id), a
 //    message record by its id. A newer revision updates that document; if Knowledge no longer has it, the next attempt creates one
 //  - before every send: `deliverySendable` (still the owner's last decision, not superseded, not a secret record)
@@ -32,6 +45,7 @@ import { companionTargets } from "./connect.ts";
 import { cleanText } from "./contract.ts";
 import { LABELS } from "./detect/redact.ts";
 import type { DetectClass } from "./detect/types.ts";
+import { queueRetraction } from "./documents.ts";
 import { piiClassesOf } from "./router.ts";
 import { deliverySendable, getSetting, humanTime, loadClassifierConfig, parsePii, putSetting, type Row, recordRow, sourceRow } from "./store.ts";
 
@@ -59,6 +73,12 @@ export const AREA_RE = /^[a-z0-9][a-z0-9-]{1,63}$/;
 export const ONLY_KNOWLEDGE = "Observer sends only to Knowledge in this version. Decide the record again with Knowledge as the destination.";
 export const KNOWLEDGE_MISSING = "Knowledge is not available to Observer now (add Knowledge to the workspace and give it a licence in Portal). Observer sends when it is.";
 export const TEXT_GONE = "The text of this record is gone (purged or past its retention), so there is nothing to send.";
+export const HUMAN_EDITED = "A person changed this document in Knowledge after Observer last wrote it. Observer does not overwrite their edit, so this version was not sent.";
+export const WAITING_EARLIER = "Observer waits for an earlier send of this document to be settled, so that Knowledge gets one document and not two.";
+/** what a document the source deleted keeps in Knowledge when the privacy setting is purge (the document is archived) */
+export const RETRACTED_BODY = "This document was deleted at its source. Observer removed its text from this copy.";
+export const RETRACTED_SUMMARY = "Deleted at its source; Observer removed the text.";
+export const SOURCE_DELETED_TAG = "source-deleted";
 
 const str = (v: unknown): string => String(v);
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
@@ -196,8 +216,8 @@ export function escapeCsvFormulas(csv: string): string {
   return out;
 }
 
-export function tagsFor(collection: string, classes: Readonly<Record<string, number>>, kind: string | null): string[] {
-  const raw = ["observer", collection ? `source:${collection}` : "", ...piiClassesOf(classes).map((c) => `pii:${c}`), kind ? `kind:${kind}` : ""];
+export function tagsFor(collection: string, classes: Readonly<Record<string, number>>, kind: string | null, extra: readonly string[] = []): string[] {
+  const raw = ["observer", ...extra, collection ? `source:${collection}` : "", ...piiClassesOf(classes).map((c) => `pii:${c}`), kind ? `kind:${kind}` : ""];
   const out: string[] = [];
   for (const t of raw) {
     const n = normalizeTag(cleanText(t)).slice(0, TAG_MAX);
@@ -215,6 +235,21 @@ export interface Payload {
   key: string;
   rev: string;
   area: string | null;
+}
+
+/** An https link without query, fragment and userinfo (documents.ts cleanUrl does the same at storage; stored rows are checked again). */
+function plainUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== "https:") return null;
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return null;
+  }
 }
 
 /** Build the call for one outbox row (null: the record has no text left). `area` = where a NEW document goes. */
@@ -254,20 +289,30 @@ export function buildPayload(db: Db, row: Row, targetArea: string): Payload | nu
   const isDoc = target.key.startsWith("doc:");
   const cfg = loadClassifierConfig(db);
   const show = (t: string): string => cleanText(redact ? redactForDelivery(t, cfg) : t);
+  // the metadata of a document (title, path, link, collection) is redacted whatever the decision: only the body follows it
+  const meta = (t: string): string => (isDoc ? cleanText(redactForDelivery(t, cfg)) : show(t));
   // a document is its chunks in order; a conversation is its messages, each with its time (and its author unless redacted)
   const body = isDoc
     ? show(msgs.map((m) => str(m.text)).join(""))
     : msgs.map((m) => `${humanTime(Number(m.sent_at))}${redact ? "" : ` · ${cleanText(str(m.author_ref)) || "unknown"}`}\n${show(str(m.text))}`).join("\n\n");
   const finalBody = clip(target.mime === "text/csv" ? escapeCsvFormulas(body) : body, BODY_MAX);
   const label = src ? str(src.label) : "a source";
-  const subject = rec.thread === null || rec.thread === undefined ? "" : show(str(rec.thread)).trim();
-  const title = clip(subject || `${label} · ${target.collection} · ${humanTime(Number(rec.window_start))}`, TITLE_MAX, "…");
-  const where = [target.path ? `Path: ${target.path}` : "", target.url ? `Original: ${target.url}` : ""].filter(Boolean).join(". ");
-  const summary = clip(`From ${label} (${target.collection}) through Observer${redact ? ", personal data redacted" : ""}.${where ? ` ${where}.` : ""}`, SUMMARY_MAX);
-  const tags = tagsFor(target.collection, parsePii(rec.pii_json), target.kind);
-  const existing = db.prepare("SELECT target_ref FROM obs_targets WHERE key = ? AND destination = 'knowledge'").get(target.key);
+  const collection = isDoc ? meta(target.collection) : target.collection;
+  const subject = rec.thread === null || rec.thread === undefined ? "" : meta(str(rec.thread)).replace(/\s+/g, " ").trim();
+  const title = clip(subject || `${label} · ${collection} · ${humanTime(Number(rec.window_start))}`, TITLE_MAX, "…");
+  const path = target.path ? meta(target.path).replace(/\s+/g, " ").trim() : "";
+  const link = target.url ? plainUrl(target.url) : null;
+  // a link that holds personal data is left out (its words cannot be replaced without breaking it)
+  const url = link !== null && classifyText(link, cfg).spans.length === 0 ? link : null;
+  const where = [path ? `Path: ${path}` : "", url ? `Original: ${url}` : ""].filter(Boolean).join(". ");
+  const summary = clip(`From ${label} (${collection}) through Observer${redact ? ", personal data redacted" : ""}.${where ? ` ${where}.` : ""}`, SUMMARY_MAX);
+  const tags = tagsFor(collection, parsePii(rec.pii_json), target.kind, isDoc ? ["untrusted"] : []);
+  const existing = db.prepare("SELECT target_ref, version FROM obs_targets WHERE key = ? AND destination = 'knowledge'").get(target.key);
   const common: Record<string, Json> = { title, body: finalBody, summary, tags, status };
-  if (existing) return { op: "document_update", input: { id: str(existing.target_ref), ...common }, key: target.key, rev: target.rev, area: null };
+  if (existing) {
+    const version = existing.version === null || existing.version === undefined ? null : Number(existing.version);
+    return { op: "document_update", input: { id: str(existing.target_ref), ...(version === null ? {} : { expectedVersion: version }), ...common }, key: target.key, rev: target.rev, area: null };
+  }
   return { op: "document_create", input: { area, ...common }, key: target.key, rev: target.rev, area };
 }
 
@@ -287,6 +332,8 @@ export interface DrainResult {
   held: number;
   failed: number;
   waiting: number;
+  /** Knowledge copies of documents the source deleted that were archived / tagged (obs_retractions) */
+  retracted: number;
   /** ms until the next row is due (null: none waits) */
   nextInMs: number | null;
   /** more rows were due than one batch */
@@ -301,8 +348,14 @@ function due(db: Db, now: number, limit: number): Row[] {
 
 /** Send the due outbox rows once. Pure over its deps (the job tick and the tests call it). */
 export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
-  const out: DrainResult = { sent: 0, held: 0, failed: 0, waiting: 0, nextInMs: null, more: false };
+  const out: DrainResult = { sent: 0, held: 0, failed: 0, waiting: 0, retracted: 0, nextInMs: null, more: false };
   const now0 = clockNow();
+  // a stored call whose record is past its retention holds text that must be gone: emptied here, and the row then fails with TEXT_GONE
+  d.write((db) =>
+    db
+      .prepare("UPDATE obs_deliveries SET payload_json = NULL WHERE payload_json IS NOT NULL AND record_id IN (SELECT id FROM obs_records WHERE text_purge_at IS NOT NULL AND text_purge_at <= ?)")
+      .run(now0),
+  );
   const rows = due(d.db, now0, DRAIN_BATCH + 1);
   out.more = rows.length > DRAIN_BATCH;
   let areaCache: string | null = null;
@@ -321,6 +374,13 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
       out.waiting += 1;
       continue;
     }
+    // a retry honours the record's retention too: past text_purge_at nothing is sent, whatever was stored
+    const rec = recordRow(d.db, str(row.record_id));
+    if (rec && rec.text_purge_at !== null && rec.text_purge_at !== undefined && Number(rec.text_purge_at) <= at) {
+      d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(TEXT_GONE, at, id));
+      out.failed += 1;
+      continue;
+    }
     let payload: Payload | null;
     try {
       if (row.payload_json !== null && row.payload_json !== undefined) payload = JSON.parse(str(row.payload_json)) as Payload;
@@ -328,12 +388,23 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
         if (areaCache === null) areaCache = chosenArea(d.db) ?? defaultArea(await knowledgeAreas(d.callApp));
         payload = buildPayload(d.db, row, areaCache);
         if (payload === null) {
-          d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(TEXT_GONE, at, id));
+          d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(TEXT_GONE, at, id));
           out.failed += 1;
           continue;
         }
+        // an earlier create of this same document was sent and not answered: it is settled first (same key, same bytes), and this
+        // revision then updates the document it made. Creating now could make a second document.
+        if (payload.op === "document_create" && unansweredElsewhere(d.db, payload.key, id)) {
+          d.write((db) => db.prepare("UPDATE obs_deliveries SET last_error = ?, next_at = ?, updated_at = ? WHERE id = ?").run(WAITING_EARLIER, at + DELIVERY_BACKOFF_BASE_MS, at, id));
+          out.waiting += 1;
+          continue;
+        }
         const built = payload;
-        d.write((db) => db.prepare("UPDATE obs_deliveries SET payload_json = ?, first_attempt_at = COALESCE(first_attempt_at, ?), updated_at = ? WHERE id = ?").run(JSON.stringify(built), at, at, id));
+        d.write((db) =>
+          db
+            .prepare("UPDATE obs_deliveries SET payload_json = ?, target_key = ?, payload_op = ?, first_attempt_at = COALESCE(first_attempt_at, ?), updated_at = ? WHERE id = ?")
+            .run(JSON.stringify(built), built.key, built.op, at, at, id),
+        );
       }
       const r = await d.callApp(KNOWLEDGE, payload.op, payload.input as Json, { idempotencyKey: str(row.idem_key) });
       const done = clockNow();
@@ -349,12 +420,25 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
       if (ref === null) throw new TbError("knowledge_answer", "Knowledge answered without a document id", 502);
       const sentPayload = payload;
       d.write((db) => {
-        db.prepare("UPDATE obs_deliveries SET status = 'sent', target_ref = ?, attempts = attempts + 1, last_error = NULL, next_at = NULL, hold_id = NULL, updated_at = ? WHERE id = ?").run(ref, done, id);
+        // sent: the call is done, so the stored bytes (the whole body) are no longer needed for a retry
+        db.prepare("UPDATE obs_deliveries SET status = 'sent', target_ref = ?, attempts = attempts + 1, last_error = NULL, next_at = NULL, hold_id = NULL, payload_json = NULL, updated_at = ? WHERE id = ?").run(ref, done, id);
         db.prepare("UPDATE obs_records SET state = 'delivered', updated_at = ? WHERE id = ? AND state = 'approved' AND revision = ?").run(done, str(row.record_id), Number(row.revision));
         db.prepare(
-          `INSERT INTO obs_targets (key, destination, target_ref, area, rev, updated_at) VALUES (?, 'knowledge', ?, ?, ?, ?)
-           ON CONFLICT (key, destination) DO UPDATE SET target_ref = excluded.target_ref, area = COALESCE(excluded.area, obs_targets.area), rev = excluded.rev, updated_at = excluded.updated_at`,
-        ).run(sentPayload.key, ref, typeof output.area === "string" ? output.area : sentPayload.area, sentPayload.rev, done);
+          `INSERT INTO obs_targets (key, destination, target_ref, area, rev, version, tags_json, updated_at) VALUES (?, 'knowledge', ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (key, destination) DO UPDATE SET target_ref = excluded.target_ref, area = COALESCE(excluded.area, obs_targets.area), rev = excluded.rev, version = excluded.version,
+             tags_json = excluded.tags_json, updated_at = excluded.updated_at`,
+        ).run(
+          sentPayload.key,
+          ref,
+          typeof output.area === "string" ? output.area : sentPayload.area,
+          sentPayload.rev,
+          typeof output.version === "number" && Number.isInteger(output.version) ? output.version : null,
+          JSON.stringify(sentPayload.input.tags ?? []),
+          done,
+        );
+        // the source deleted the document while its first create was in flight: the copy it just made follows the privacy setting
+        const gone = deletedAtSource(db, sentPayload.key);
+        if (gone) queueRetraction(db, sentPayload.key, done);
       });
       out.sent += 1;
     } catch (e) {
@@ -364,6 +448,12 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
       if (!fresh) continue;
       const attempts = Number(fresh.attempts) + 1;
       const p = fresh.payload_json === null ? null : (JSON.parse(str(fresh.payload_json)) as Payload);
+      // a person edited the document in Knowledge since Observer's last write: their edit stays; this version is not sent
+      if (code === "version_conflict" && p?.op === "document_update") {
+        d.write((db) => db.prepare("UPDATE obs_deliveries SET status = 'failed', payload_json = NULL, attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE id = ?").run(attempts, HUMAN_EDITED, at, id));
+        out.failed += 1;
+        continue;
+      }
       // the Knowledge document was deleted there: forget the link, the next attempt creates a new document
       if (code === "not_found" && p?.op === "document_update") {
         d.write((db) => {
@@ -382,12 +472,96 @@ export async function drainOutbox(d: DrainDeps): Promise<DrainResult> {
       }
     }
   }
-  if (out.sent + out.failed + out.held > 0) d.statusChanged?.();
+  if (d.targets().includes(KNOWLEDGE)) await drainRetractions(d, out);
+  if (out.sent + out.failed + out.held + out.retracted > 0) d.statusChanged?.();
   const next = d.db.prepare("SELECT MIN(next_at) AS n FROM obs_deliveries WHERE status IN ('pending', 'held') AND superseded = 0").get();
-  const n = next?.n;
+  const nextRet = d.db.prepare("SELECT MIN(next_at) AS n FROM obs_retractions WHERE status = 'pending'").get();
+  const n = [next?.n, nextRet?.n].filter((x) => x !== null && x !== undefined).map(Number);
   const pendingNow = d.db.prepare("SELECT 1 AS x FROM obs_deliveries WHERE status = 'pending' AND superseded = 0 AND next_at IS NULL LIMIT 1").get();
-  out.nextInMs = pendingNow ? 0 : n === null || n === undefined ? null : Math.max(0, Number(n) - clockNow());
+  const retNow = d.db.prepare("SELECT 1 AS x FROM obs_retractions WHERE status = 'pending' AND next_at IS NULL LIMIT 1").get();
+  out.nextInMs = pendingNow || retNow ? 0 : n.length === 0 ? null : Math.max(0, Math.min(...n) - clockNow());
   return out;
+}
+
+/** Is there another delivery whose document_create for this document was sent (built) and has no answer yet? */
+function unansweredElsewhere(db: Db, key: string, exceptId: string): boolean {
+  return !!db
+    .prepare(
+      `SELECT 1 AS x FROM obs_deliveries d WHERE d.target_key = ? AND d.id <> ? AND d.payload_op = 'document_create' AND d.status IN ('pending', 'held') AND d.first_attempt_at IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM obs_targets t WHERE t.key = d.target_key AND t.destination = 'knowledge') LIMIT 1`,
+    )
+    .get(key, exceptId);
+}
+
+/** Did the source delete this document (a tombstone is stored for its provenance key)? */
+function deletedAtSource(db: Db, key: string): boolean {
+  if (!key.startsWith("doc:")) return false;
+  const [account, collection, docId] = key.slice(4).split("\u0000");
+  if (account === undefined || collection === undefined || docId === undefined) return false;
+  return !!db.prepare("SELECT 1 AS x FROM obs_documents d JOIN obs_sources s ON s.id = d.source_id WHERE s.account = ? AND d.collection = ? AND d.doc_id = ? AND d.deleted = 1 LIMIT 1").get(account, collection, docId);
+}
+
+/** The Knowledge copies of documents the source deleted: archived (privacy purge) or tagged `source-deleted` (keep). */
+async function drainRetractions(d: DrainDeps, out: DrainResult): Promise<void> {
+  const now0 = clockNow();
+  const rows = d.db.prepare("SELECT * FROM obs_retractions WHERE status = 'pending' AND (next_at IS NULL OR next_at <= ?) ORDER BY created_at, key LIMIT ?").all(now0, DRAIN_BATCH);
+  for (const r of rows) {
+    const key = str(r.key);
+    const at = clockNow();
+    const target = d.db.prepare("SELECT tags_json FROM obs_targets WHERE key = ? AND destination = 'knowledge'").get(key);
+    let stored: string[] = [];
+    try {
+      const v: unknown = target?.tags_json ? JSON.parse(str(target.tags_json)) : [];
+      stored = Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      stored = [];
+    }
+    const archive = str(r.mode) === "archive";
+    // archive: the text goes (the document is archived with a notice); tag: only the tag is added, the stored tags stay
+    const tags = tagsFor("", {}, null, ["untrusted", SOURCE_DELETED_TAG]);
+    const input: Record<string, Json> = archive
+      ? { id: str(r.target_ref), status: "archived", body: RETRACTED_BODY, summary: RETRACTED_SUMMARY, tags }
+      : { id: str(r.target_ref), tags: [...new Set([...stored, SOURCE_DELETED_TAG])].slice(0, TAGS_MAX) };
+    try {
+      const res = await d.callApp(KNOWLEDGE, "document_update", input as Json, { idempotencyKey: str(r.idem_key) });
+      const done = clockNow();
+      if (res.status === "held") {
+        d.write((db) => db.prepare("UPDATE obs_retractions SET next_at = ?, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(done + HELD_RECHECK_MS, done, key));
+        out.waiting += 1;
+        continue;
+      }
+      const output = isObj(res.output) ? res.output : {};
+      d.write((db) => {
+        db.prepare("UPDATE obs_retractions SET status = 'sent', attempts = attempts + 1, last_error = NULL, next_at = NULL, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(done, key);
+        db.prepare("UPDATE obs_targets SET version = ?, tags_json = ?, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(
+          typeof output.version === "number" && Number.isInteger(output.version) ? output.version : null,
+          JSON.stringify(input.tags),
+          done,
+          key,
+        );
+      });
+      out.retracted += 1;
+    } catch (e) {
+      if (e instanceof TbError && e.code === "job_lease_lost") throw e;
+      const code = e instanceof TbError ? e.code : "error";
+      const attempts = Number(r.attempts) + 1;
+      if (code === "not_found") {
+        // Knowledge has no such document any more: nothing to retract, and the link is stale
+        d.write((db) => {
+          db.prepare("UPDATE obs_retractions SET status = 'sent', attempts = ?, last_error = NULL, next_at = NULL, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(attempts, at, key);
+          db.prepare("DELETE FROM obs_targets WHERE key = ? AND destination = 'knowledge'").run(key);
+        });
+        continue;
+      }
+      if (isRefusal(e) || attempts >= MAX_DELIVERY_ATTEMPTS) {
+        d.write((db) => db.prepare("UPDATE obs_retractions SET status = 'failed', attempts = ?, last_error = ?, next_at = NULL, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(attempts, deliveryError(code, "final"), at, key));
+        out.failed += 1;
+      } else {
+        d.write((db) => db.prepare("UPDATE obs_retractions SET attempts = ?, last_error = ?, next_at = ?, updated_at = ? WHERE key = ? AND destination = 'knowledge'").run(attempts, deliveryError(code, "retry"), at + deliveryBackoffMs(attempts, d.random), at, key));
+        out.waiting += 1;
+      }
+    }
+  }
 }
 
 /** The drain job's tick: never fails (an unexpected error waits and tries again), so the outbox always has its runner. */
