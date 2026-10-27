@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
-import { type MessageRow, PAGE_SCHEMA, readPage, rowConforms, toIncoming } from "../src/contract.ts";
+import { DOC_PAGE_SCHEMA, docRowConforms, type MessageRow, PAGE_SCHEMA, readDocPage, readPage, rowConforms, toIncoming } from "../src/contract.ts";
 import { FakeConnect } from "./fake-connect.ts";
 
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
@@ -43,6 +43,42 @@ describe("the vendored contract files", () => {
     assert.ok(FIXTURES.valid.length >= 2 && FIXTURES.invalid.length >= 6);
     for (const doc of FIXTURES.valid) assert.deepEqual(validateAgainstSchema(PAGE_SCHEMA, doc), { ok: true });
     for (const { why, doc } of FIXTURES.invalid) assert.equal(validateAgainstSchema(PAGE_SCHEMA, doc).ok, false, why);
+  });
+});
+
+describe("documents/1 (DRAFT, C373)", () => {
+  it("is the byte copy named in PROVENANCE.md, and the runtime copy is the same bytes", () => {
+    const prov = file("./contracts/PROVENANCE.md").toString();
+    for (const f of ["./contracts/documents.1.schema.json", "./contracts/documents.1.json", "../src/contracts/documents.1.schema.json"]) assert.ok(prov.includes(sha256(file(f))), `${f} does not match the sha256 in PROVENANCE.md`);
+    assert.ok(file("./contracts/documents.1.schema.json").equals(file("../src/contracts/documents.1.schema.json")));
+  });
+  it("fixtures: every valid page validates, every invalid page fails (spec main 0bd02e9)", () => {
+    const fx = JSON.parse(file("./contracts/documents.1.json").toString()) as { valid: Json[]; invalid: { why?: string; doc: Json }[] };
+    assert.ok(fx.valid.length >= 2 && fx.invalid.length >= 6);
+    for (const doc of fx.valid) assert.deepEqual(validateAgainstSchema(DOC_PAGE_SCHEMA, doc), { ok: true });
+    for (const { why, doc } of fx.invalid) assert.equal(validateAgainstSchema(DOC_PAGE_SCHEMA, doc).ok, false, why);
+  });
+  it("rows: a live row needs a title, a deleted one has empty text, text/html and a non-https url are refused", () => {
+    const ok = { id: "mcp://acme/finance/q3", collection: "finance", title: "Q3", mime: "text/markdown", updatedAt: "2026-10-27T09:00:00Z", rev: "r1", text: "x", untrusted: true };
+    assert.equal(docRowConforms(ok), true, "quiet on good");
+    assert.equal(docRowConforms({ ...ok, title: "" }), false);
+    assert.equal(docRowConforms({ ...ok, deleted: true, title: "", text: "" }), true);
+    assert.equal(docRowConforms({ ...ok, deleted: true, text: "left over" }), false);
+    assert.equal(docRowConforms({ ...ok, mime: "text/html" }), false);
+    assert.equal(docRowConforms({ ...ok, url: "http://drive.example.com/q3" }), false);
+    assert.equal(docRowConforms({ ...ok, url: "https://drive.example.com/q3", author: { handle: "Anna Novak", raw: true } }), true);
+    assert.equal(docRowConforms({ ...ok, untrusted: false }), false);
+  });
+  it("the fake Connect validates every documents page it serves: a drifted page makes it throw", async () => {
+    const fake = new FakeConnect();
+    fake.addAccount({ id: "acc1", datasets: ["documents"], collections: [{ id: "c", name: "C" }] });
+    fake.putDoc("acc1", { collection: "c", id: "d1", title: "t", text: "x", updatedAt: Date.UTC(2026, 9, 27) });
+    const out = await fake.callApp("connect", "data_pull", { account: "acc1", dataset: "documents" });
+    assert.equal(readDocPage(out.output).rows.length, 1);
+    fake.drift = (p) => {
+      (p.rows as Record<string, unknown>[])[0] = { id: "d1" };
+    };
+    await assert.rejects(fake.callApp("connect", "data_pull", { account: "acc1", dataset: "documents" }), /drifted from documents\/1/);
   });
 });
 

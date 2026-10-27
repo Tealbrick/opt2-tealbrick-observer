@@ -4,7 +4,7 @@
   "id": "observer",
   "name": "Observer",
   "summary": "Reads the conversations you choose, read only, and files what matters: classified first, then sent to Knowledge, Task Board or you.",
-  "description": "Observer watches the conversations you share with it through Connect (read only) and turns them into records: grouped by thread, checked for secrets and personal data by fixed rules, and routed by your rules to Knowledge (as drafts by default), Task Board or a person in Operator Inbox. Anything with personal data or no matching rule waits for your review. Secrets are never kept. Live reading is off until you press Start; message text is kept 30 days by default. Observer never sends, edits or deletes a message.",
+  "description": "Observer watches the conversations you share with it through Connect (read only) and turns them into records: grouped by thread, checked for secrets and personal data by fixed rules, and routed by your rules to Knowledge, Task Board or a person in Operator Inbox. Anything with personal data or no matching rule waits for your review. Secrets are never kept. Live reading is off until you press Start; message text is kept 30 days by default. Observer never sends, edits or deletes a message.",
   "version": "0.1.1",
   "sdkMajor": 1,
   "publisher": {
@@ -373,6 +373,14 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "One account: its conversations, history flag and kept days (one data_catalog call). Without it: the shared accounts only."
+          },
+          "dataset": {
+            "type": "string",
+            "enum": [
+              "messages",
+              "documents"
+            ],
+            "description": "With account: which dataset to list (default messages). documents lists the account's collections."
           }
         }
       },
@@ -450,7 +458,8 @@
                 "live",
                 "history",
                 "historyCapable",
-                "keptDays"
+                "keptDays",
+                "dataset"
               ],
               "properties": {
                 "id": {
@@ -585,6 +594,14 @@
                     }
                   ],
                   "description": "How many days Connect keeps this account's messages; null when it did not say."
+                },
+                "dataset": {
+                  "type": "string",
+                  "enum": [
+                    "messages",
+                    "documents"
+                  ],
+                  "description": "messages: conversations; documents: collections of documents."
                 }
               }
             }
@@ -638,7 +655,8 @@
               "live",
               "history",
               "historyCapable",
-              "keptDays"
+              "keptDays",
+              "dataset"
             ],
             "properties": {
               "id": {
@@ -773,6 +791,14 @@
                   }
                 ],
                 "description": "How many days Connect keeps this account's messages; null when it did not say."
+              },
+              "dataset": {
+                "type": "string",
+                "enum": [
+                  "messages",
+                  "documents"
+                ],
+                "description": "messages: conversations; documents: collections of documents."
               }
             }
           },
@@ -939,6 +965,14 @@
             "type": "integer",
             "minimum": 1,
             "maximum": 365
+          },
+          "dataset": {
+            "type": "string",
+            "enum": [
+              "messages",
+              "documents"
+            ],
+            "description": "messages (default): conversations of a chat account. documents: collections of documents (MCP resources, database table pages); `conversations` then names the collections."
           }
         }
       },
@@ -961,7 +995,8 @@
               "live",
               "history",
               "historyCapable",
-              "keptDays"
+              "keptDays",
+              "dataset"
             ],
             "properties": {
               "id": {
@@ -1096,6 +1131,14 @@
                   }
                 ],
                 "description": "How many days Connect keeps this account's messages; null when it did not say."
+              },
+              "dataset": {
+                "type": "string",
+                "enum": [
+                  "messages",
+                  "documents"
+                ],
+                "description": "messages: conversations; documents: collections of documents."
               }
             }
           }
@@ -1202,7 +1245,8 @@
               "live",
               "history",
               "historyCapable",
-              "keptDays"
+              "keptDays",
+              "dataset"
             ],
             "properties": {
               "id": {
@@ -1337,6 +1381,14 @@
                   }
                 ],
                 "description": "How many days Connect keeps this account's messages; null when it did not say."
+              },
+              "dataset": {
+                "type": "string",
+                "enum": [
+                  "messages",
+                  "documents"
+                ],
+                "description": "messages: conversations; documents: collections of documents."
               }
             }
           }
@@ -2714,6 +2766,206 @@
     },
     {
       "audience": "person",
+      "id": "delivery_target_get",
+      "title": "Delivery target",
+      "description": "Where Observer puts the documents it delivers: the Knowledge area you picked, or Knowledge's shared company area. Lists the areas Knowledge shows Observer, with Observer's access.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area",
+          "effectiveArea",
+          "areas",
+          "knowledgeMissing",
+          "error",
+          "counts"
+        ],
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "effectiveArea": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "areas": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "id",
+                "label",
+                "kind",
+                "access"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 2,
+                  "maxLength": 64
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 120
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "shared",
+                    "agent"
+                  ]
+                },
+                "access": {
+                  "type": "string",
+                  "enum": [
+                    "read",
+                    "read_write"
+                  ]
+                }
+              }
+            }
+          },
+          "knowledgeMissing": {
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 0,
+                "maxLength": 280
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "counts": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pending",
+              "held",
+              "sent",
+              "failed"
+            ],
+            "properties": {
+              "pending": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
+              },
+              "held": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
+              },
+              "sent": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
+              },
+              "failed": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 1000000000
+              }
+            }
+          }
+        }
+      },
+      "crud": [
+        "read"
+      ],
+      "effect": "read",
+      "idempotency": "none",
+      "receipt": false
+    },
+    {
+      "audience": "person",
+      "id": "delivery_target_set",
+      "title": "Change the delivery target",
+      "description": "Pick the Knowledge area Observer delivers new documents to; null goes back to Knowledge's shared company area. A document Observer delivered before stays where it is and is updated there.",
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area"
+        ],
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "area"
+        ],
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9-]{1,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "crud": [
+        "update"
+      ],
+      "effect": "write",
+      "idempotency": "supported",
+      "receipt": true
+    },
+    {
+      "audience": "person",
       "id": "privacy_get",
       "title": "Privacy settings",
       "description": "How long Observer keeps message text and review records.",
@@ -2877,7 +3129,7 @@
       "crud": [
         "read"
       ],
-      "purpose": "Read the conversations you shared with Observer. Read only: Observer cannot send, edit or delete."
+      "purpose": "Read the conversations and document collections you shared with Observer. Read only: Observer cannot send, edit or delete."
     },
     {
       "product": "knowledge",
@@ -2891,7 +3143,7 @@
         "create",
         "update"
       ],
-      "purpose": "Write classified records as Knowledge documents (drafts by default)."
+      "purpose": "Write the records you approve as Knowledge documents in the area you pick (default: the company area) and update them when the source changes."
     },
     {
       "product": "kanban",

@@ -87,7 +87,7 @@ describe("Review", () => {
     const c = lastCall("review_decide");
     assert.deepEqual(c.input, { recordId: "rec_bank", revision: 1, decision: "deliver_redacted", destination: "knowledge" });
     assertWriteHeaders(c);
-    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. Delivery starts in a later version: the record waits on the Activity page\./);
+    assert.match(m.host.textContent ?? "", /Approved for Knowledge, redacted\. The Activity page shows the delivery\./);
     assert.deepEqual(rows(m.host).map((r) => r.querySelector("b")?.textContent?.slice(0, 8)), ["Messages", "Deploy n", "Messages"]);
     assert.deepEqual(m.opened.at(-1), "rec_key", "the next record is opened");
     await m.unmount();
@@ -121,7 +121,7 @@ describe("Review", () => {
     stub.targets = [];
     const none = await mountReview();
     assert.match(none.host.textContent ?? "", /Observer needs Connect and Knowledge to work\. Connect and Knowledge are not available to it now\. Task Board/);
-    assert.match(none.host.textContent ?? "", /only when Connect offers shared data access, in a later Connect version\. You need to do nothing now\./, "the Connect step");
+    assert.match(none.host.textContent ?? "", /add Connect to this workspace and give it a licence, then share an account with Observer in Connect\./, "the Connect step");
     assert.match(detail(none.host).textContent ?? "", /Knowledge is not available to Observer, so nothing can be delivered now\. You can still drop the record\./);
     assert.ok(control(detail(none.host), "Deliver redacted").disabled);
     assert.ok(!control(detail(none.host), "Drop").disabled);
@@ -286,10 +286,10 @@ describe("Review", () => {
     await m.unmount();
   });
 
-  it("says that delivery starts in a later version, and promises none now", async () => {
+  it("says where approved records go (Knowledge; Task Board and Inbox later)", async () => {
     reset();
     const m = await mountReview();
-    assert.match(m.host.textContent ?? "", /Delivery to Knowledge, Task Board and Inbox starts in a later version\./);
+    assert.match(m.host.textContent ?? "", /Observer delivers what you approve to Knowledge \(the area is set on Routing\)\./);
     assert.doesNotMatch(m.host.textContent ?? "", /Nothing reaches Knowledge/);
     await m.unmount();
   });

@@ -127,7 +127,7 @@ function Detail({ id, sourceLabels, rules, targets, onDecided }: { id: string; s
       ...(toPlace ? { destination: destination as "knowledge" | "kanban" | "inbox" } : {}),
       ...(decision === "deliver" && hidden ? { acknowledged: true } : {}),
     });
-    onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. Delivery starts in a later version: the record waits on the Activity page.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
+    onDecided(toPlace ? `Approved for ${destinationName(destination)}${decision === "deliver_redacted" ? ", redacted" : ""}. The Activity page shows the delivery.` : decision === "drop" ? "Dropped. Observer deletes the text after the retention time." : "Kept as delivered.");
   };
   const decide = (decision: Decision) =>
     act(async () => {
@@ -331,7 +331,7 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
     <section className="app-page" aria-label="Review">
       <PageHead title="Review" lede="Records with personal data, a possible secret, or no matching route wait here. Nothing is delivered before you decide." />
       <Notice tone="neutral" role="status">
-        Delivery to Knowledge, Task Board and Inbox starts in a later version. A record you approve waits until then.
+        Observer delivers what you approve to Knowledge (the area is set on Routing). Delivery to Task Board and Inbox starts in a later version.
       </Notice>
       <RequiredApps targets={d?.targets ?? null} />
       {message ? (

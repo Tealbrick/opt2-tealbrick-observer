@@ -11,7 +11,7 @@ import type { AppDefinition, CompanionTargetsView, OpContext } from "@opt2-tealb
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { type CallBudget, type Lane, sharedBudget } from "./budget.ts";
 import { now as clockNow } from "./clock.ts";
-import { MESSAGES_CONTRACT, MESSAGES_DATASET, type Page, readPage } from "./contract.ts";
+import { cleanText, type Dataset, DOC_PAGE_MAX, DOCUMENTS_CONTRACT, DOCUMENTS_DATASET, type DocPage, MESSAGES_CONTRACT, MESSAGES_DATASET, type Page, readDocPage, readPage } from "./contract.ts";
 import { CONNECT_PRODUCT, connectCompanionProblems } from "./guards.ts";
 import { manifest } from "./manifest.ts";
 
@@ -31,6 +31,10 @@ export interface ConnectConversation {
 }
 export interface ConnectAccount {
   id: string;
+  /** the dataset these conversations (messages) or collections (documents) belong to */
+  dataset: Dataset;
+  /** every dataset of the account Observer can read (pull delivery, a contract it knows) */
+  datasets: Dataset[];
   /** the service as Connect names it (slack, telegram, …): kinds come from Connect, not from a fixed list */
   kind: string;
   label: string;
@@ -63,11 +67,15 @@ export interface PullQuery {
 export interface ConnectPort {
   /** accounts shared with Observer for reading (level shared): ONE call, no catalogs */
   accounts(): Promise<SharedAccount[]>;
-  /** one shared account with its conversations, history flag and kept days (the list + ONE catalog), or null */
-  account(id: string): Promise<ConnectAccount | null>;
-  estimate(q: { account: string; conversations: string[]; since: number; until: number | null }): Promise<ConnectEstimate>;
+  /** one shared account with the conversations (messages) or collections (documents) of one dataset (default: the first it has,
+   *  messages before documents), its history flag and kept days (the list + ONE catalog), or null when the account is not shared
+   *  or has no such dataset */
+  account(id: string, dataset?: Dataset): Promise<ConnectAccount | null>;
+  estimate(q: { account: string; conversations: string[]; since: number; until: number | null; dataset?: Dataset }): Promise<ConnectEstimate>;
   /** one page of the account's `messages` dataset (all conversations, in Connect's change order) */
   pull(q: PullQuery): Promise<Page>;
+  /** one page of the account's `documents` dataset (all collections, forward in Connect's change order, at most 50 rows) */
+  pullDocuments(q: { account: string; cursor: string | null; limit?: number; lane?: Lane }): Promise<DocPage>;
 }
 
 /** What the port needs from a context: an op handler ctx and a job ctx both have it. */
@@ -124,16 +132,25 @@ async function call(ctx: ConnectCtx, op: string, input: Record<string, unknown>)
   return r.output;
 }
 
-/** The `messages` dataset of one catalog answer, or null when the account has none Observer can read. */
-function messagesDataset(out: unknown): Record<string, unknown> | null {
-  if (!isObj(out) || !Array.isArray(out.datasets)) return null;
-  const d = out.datasets.find((x) => isObj(x) && x.dataset === MESSAGES_DATASET && x.delivery === "pull" && (x.contract === undefined || x.contract === MESSAGES_CONTRACT));
-  return isObj(d) ? d : null;
+const CONTRACT_OF: Readonly<Record<Dataset, string>> = { messages: MESSAGES_CONTRACT, documents: DOCUMENTS_CONTRACT };
+/** A dataset entry of a catalog answer Observer can read: pulled, and under the contract Observer knows (absent = the default). */
+const readable = (x: unknown, dataset: Dataset): x is Record<string, unknown> =>
+  isObj(x) && x.dataset === dataset && x.delivery === "pull" && (x.contract === undefined || x.contract === CONTRACT_OF[dataset]);
+
+/** The datasets of one catalog answer Observer can read, each with its entry. */
+function datasetsOf(out: unknown): Map<Dataset, Record<string, unknown>> {
+  const found = new Map<Dataset, Record<string, unknown>>();
+  if (!isObj(out) || !Array.isArray(out.datasets)) return found;
+  for (const ds of [MESSAGES_DATASET, DOCUMENTS_DATASET] as const) {
+    const d = out.datasets.find((x) => readable(x, ds));
+    if (isObj(d)) found.set(ds, d);
+  }
+  return found;
 }
 
-async function catalog(c: Caller, account: string): Promise<Record<string, unknown> | null> {
+async function catalog(c: Caller, account: string): Promise<Map<Dataset, Record<string, unknown>> | null> {
   try {
-    return messagesDataset(await c("data_catalog", { account }));
+    return datasetsOf(await c("data_catalog", { account }));
   } catch (e) {
     // the share changed between the list and the catalog: the account is simply not there
     if (e instanceof TbError && (e.code === "not_found" || e.code === "scope_denied")) return null;
@@ -141,10 +158,14 @@ async function catalog(c: Caller, account: string): Promise<Record<string, unkno
   }
 }
 
-function accountOf(a: Record<string, unknown>, d: Record<string, unknown>): ConnectAccount {
-  const convs = Array.isArray(d.conversations) ? d.conversations : [];
+function accountOf(a: Record<string, unknown>, d: Record<string, unknown>, dataset: Dataset, datasets: Dataset[]): ConnectAccount {
+  // messages name their units `conversations`; documents name them `collections` (the documents/1 draft; `conversations` is read too)
+  const units = dataset === DOCUMENTS_DATASET && Array.isArray(d.collections) ? d.collections : d.conversations;
+  const convs = Array.isArray(units) ? units : [];
   return {
     id: text(a.account, 128),
+    dataset,
+    datasets,
     kind: kindOf(a.service),
     label: text(a.label, 200) || text(a.account, 128),
     historyCapable: d.history === true,
@@ -152,7 +173,7 @@ function accountOf(a: Record<string, unknown>, d: Record<string, unknown>): Conn
     conversations: convs
       .filter((c): c is Record<string, unknown> => isObj(c) && typeof c.id === "string" && c.id.length >= 1 && c.id.length <= 200)
       .slice(0, MAX_CONVERSATIONS)
-      .map((c) => ({ id: String(c.id), title: text(c.name, 200) || String(c.id), estimate: count(c.approxRows) })),
+      .map((c) => ({ id: String(c.id), title: cleanText(text(c.name ?? c.title, 200)) || String(c.id), estimate: count(c.approxRows) })),
   };
 }
 
@@ -162,7 +183,8 @@ async function sharedList(c: Caller): Promise<Record<string, unknown>[]> {
   return list
     .filter(
       (a): a is Record<string, unknown> =>
-        isObj(a) && a.level === "shared" && typeof a.account === "string" && a.account.length >= 1 && a.account.length <= 128 && (!Array.isArray(a.kinds) || a.kinds.includes(MESSAGES_DATASET)),
+        // the kinds list is not filtered: which datasets an account has is the catalog's answer (messages, documents)
+        isObj(a) && a.level === "shared" && typeof a.account === "string" && a.account.length >= 1 && a.account.length <= 128,
     )
     .slice(0, MAX_ACCOUNTS);
 }
@@ -171,19 +193,27 @@ export function realPort(ctx: ConnectCtx, budget: CallBudget = sharedBudget): Co
   const c = caller(ctx, budget);
   return {
     async accounts() {
-      return (await sharedList(c)).map((a) => ({ id: text(a.account, 128), kind: kindOf(a.service), label: text(a.label, 200) || text(a.account, 128) }));
+      return (await sharedList(c)).map((a) => ({ id: text(a.account, 128), kind: kindOf(a.service), label: cleanText(text(a.label, 200)) || text(a.account, 128) }));
     },
-    async account(id) {
+    async account(id, dataset) {
       const a = (await sharedList(c)).find((x) => x.account === id);
       if (!a) return null;
-      const d = await catalog(c, id);
-      return d ? accountOf(a, d) : null;
+      const all = await catalog(c, id);
+      // no dataset named: the first one the account has (messages before documents)
+      const ds = dataset ?? [...(all?.keys() ?? [])][0];
+      const d = ds === undefined ? undefined : all?.get(ds);
+      return all && d && ds ? accountOf(a, d, ds, [...all.keys()]) : null;
     },
     async estimate(q) {
-      const d = await catalog(c, q.account);
+      const dataset = q.dataset ?? MESSAGES_DATASET;
+      const d = (await catalog(c, q.account))?.get(dataset);
       if (!d) throw new TbError("account_not_shared", "this account is not shared with Observer in Connect", 404);
-      const a = accountOf({ account: q.account }, d);
+      const a = accountOf({ account: q.account }, d, dataset, [dataset]);
       const messages = a.conversations.filter((c) => q.conversations.includes(c.id)).reduce((n, c) => n + (c.estimate ?? 0), 0);
+      if (dataset === DOCUMENTS_DATASET) {
+        // a documents source reads every document of its collections when it starts: one record per document
+        return { messages, records: messages, durationS: Math.ceil((Math.ceil(messages / DOC_PAGE_MAX) * 60) / HISTORY_PAGES_PER_MIN), providerNote: "Observer reads every document of the chosen collections when you start the source." };
+      }
       const pages = Math.ceil(messages / PULL_LIMIT_MAX);
       const kept = a.retentionDays === null ? "" : ` (up to ${a.retentionDays} days)`;
       return {
@@ -199,6 +229,11 @@ export function realPort(ctx: ConnectCtx, budget: CallBudget = sharedBudget): Co
       if (q.since !== undefined && q.since !== null) input.since = isoOf(q.since);
       if (q.until !== undefined && q.until !== null) input.until = isoOf(q.until);
       return readPage(await c("data_pull", input, q.lane ?? "live"));
+    },
+    async pullDocuments(q) {
+      const input: Record<string, unknown> = { account: q.account, dataset: DOCUMENTS_DATASET, direction: "forward", limit: Math.max(1, Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX)) };
+      if (q.cursor !== null) input.cursor = q.cursor;
+      return readDocPage(await c("data_pull", input, q.lane ?? "live"));
     },
   };
 }

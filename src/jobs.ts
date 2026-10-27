@@ -28,7 +28,8 @@ import { TbError } from "@opt2-tealbrick/miniapp-sdk";
 import { CallBudget, sharedBudget } from "./budget.ts";
 import { now as clockNow } from "./clock.ts";
 import { type ConnectPort, connectPort, isPermanent, type PullQuery, plainError } from "./connect.ts";
-import { toIncoming } from "./contract.ts";
+import { DOC_PAGE_MAX, DOCUMENTS_DATASET, type DocPage, type DocumentRow, type Page, toIncoming } from "./contract.ts";
+import { storeDocument } from "./documents.ts";
 import { storeMessage } from "./ingest.ts";
 import { applyRouting } from "./pipeline.ts";
 import { attachWindow } from "./records.ts";
@@ -158,17 +159,52 @@ export function ownError(code: string, mode: "retry" | "final"): string {
     : `Observer could not store or sort what it read (${c}). It stopped this job and does not try again by itself: press Try again.`;
 }
 
-/** Write one page: every message, its windows and records, the cursor, the counts and the job's next state, in the ONE
- *  checkpoint transaction. */
-function commitPage(d: TickDeps, job: Row, rows: ReturnType<typeof toIncoming>[], skipped: number, nextCursor: string | null, next: { state: "running" | "waiting" | "done"; retryAt: number | null }, at: number): number {
-  const id = str(job.id);
-  const source = str(job.source_id);
-  return d.checkpoint({ cursor: nextCursor } as Json, (db) => {
+/** What a page writes for its rows (inside the checkpoint): how many were stored, skipped by Observer, and new records. */
+type PageWriter = (db: Db, source: string, at: number) => { stored: number; skipped: number; records: number };
+
+/** messages/1 rows: storeMessage each; the windows → records → route step runs after the job row is updated (windowSource). */
+const messageWriter =
+  (rows: ReturnType<typeof toIncoming>[]): PageWriter =>
+  (db, source, at) => {
     let stored = 0;
     for (const m of rows) {
       const r = storeMessage(db, source, m, at);
       if (r.status === "inserted" || r.status === "updated") stored += 1;
     }
+    return { stored, skipped: 0, records: -1 };
+  };
+
+/** documents/1 rows: storeDocument each, in its own savepoint (one record per document, routed at once). A document Observer
+ *  cannot store (an error of its own pipeline) is skipped and counted, so one bad document never stalls the source; a missing
+ *  digest key is not skipped (it would skip every document): it fails the page like any message. */
+const documentWriter =
+  (rows: DocumentRow[]): PageWriter =>
+  (db, source, at) => {
+    let stored = 0;
+    let skipped = 0;
+    let records = 0;
+    for (const r of rows) {
+      try {
+        const res = db.transaction(() => storeDocument(db, source, r, at));
+        if (res.status === "inserted" || res.status === "updated" || res.status === "deleted") stored += 1;
+        if ((res.status === "inserted" || res.status === "updated") && res.recordId !== null) records += 1;
+      } catch (e) {
+        if (e instanceof TbError && e.code.startsWith("digest_key")) throw e;
+        skipped += 1;
+      }
+    }
+    return { stored, skipped, records };
+  };
+
+/** Write one page: every row (messages: then their windows and records; documents: one record each), the cursor, the counts
+ *  and the job's next state, in the ONE checkpoint transaction. */
+function commitPage(d: TickDeps, job: Row, write: PageWriter, skippedByConnect: number, nextCursor: string | null, next: { state: "running" | "waiting" | "done"; retryAt: number | null }, at: number): number {
+  const id = str(job.id);
+  const source = str(job.source_id);
+  return d.checkpoint({ cursor: nextCursor } as Json, (db) => {
+    const w = write(db, source, at);
+    const stored = w.stored;
+    const skipped = skippedByConnect + w.skipped;
     const ok = db
       .prepare(
         `UPDATE obs_jobs SET cursor = ?, read_count = read_count + ?, skipped_count = skipped_count + ?, last_read_at = ?, consecutive_failures = 0,
@@ -188,7 +224,7 @@ function commitPage(d: TickDeps, job: Row, rows: ReturnType<typeof toIncoming>[]
         Number(job.until_at),
       );
     }
-    const created = windowSource(db, source, job.kind === "backfill" ? "backfill" : "live", at);
+    const created = w.records >= 0 ? w.records : windowSource(db, source, job.kind === "backfill" ? "backfill" : "live", at);
     if (created > 0) db.prepare("UPDATE obs_jobs SET record_count = record_count + ? WHERE id = ?").run(created, id);
     return stored;
   });
@@ -271,9 +307,10 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     if (!d.port) return fail(d, job, new TbError("connect_unavailable", "Connect is not reachable", 409), t);
     if (str(job.state) !== "running") setState(d, job, "state = 'running'", [], t);
     const q = query(job, src, d.pageLimit);
-    let page: Awaited<ReturnType<ConnectPort["pull"]>>;
+    const docs = src.dataset === DOCUMENTS_DATASET;
+    let page: Page | DocPage;
     try {
-      page = await d.port.pull(q);
+      page = docs ? await d.port.pullDocuments({ account: q.account, cursor: q.cursor, limit: Math.min(DOC_PAGE_MAX, q.limit ?? DOC_PAGE_MAX), lane: q.lane ?? "live" }) : await d.port.pull(q);
     } catch (e) {
       return fail(d, jobRow(d.db, jobId) ?? job, e, clockNow());
     }
@@ -293,7 +330,8 @@ export async function runTick(jobId: string, d: TickDeps): Promise<JobOutcome> {
     // the job's next state is part of the page's transaction (the last page of a history read writes `done` with it)
     const next = !finished ? { state: "running" as const, retryAt: null } : kind === "backfill" ? { state: "done" as const, retryAt: null } : { state: "waiting" as const, retryAt: at + interval };
     try {
-      commitPage(d, fresh, page.rows.map(toIncoming), page.invalid + page.quarantined, nextCursor, next, at);
+      const write = docs ? documentWriter((page as DocPage).rows) : messageWriter((page as Page).rows.map(toIncoming));
+      commitPage(d, fresh, write, page.invalid + page.quarantined, nextCursor, next, at);
     } catch (e) {
       // nothing of the page was kept (one transaction); a lost lease is the SDK's (fail rethrows it), a stopped job just ends
       if (e instanceof TbError && e.code === "job_not_active") return DONE;

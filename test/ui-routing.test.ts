@@ -1,7 +1,7 @@
 // Routing page (src/ui/routing.tsx): the ordered rules, rule 0 locked, add / edit / move / delete.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { alerts, assertWriteHeaders, callsOf, click, compileUi, control, flush, h, lastCall, mount, openDialog, RULE_ZERO, reset, stub, type, within } from "./ui-harness.ts";
+import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, flush, h, lastCall, mount, openDialog, RULE_ZERO, reset, stub, type, within } from "./ui-harness.ts";
 
 const ui = compileUi("routing");
 type Routing = typeof import("../src/ui/routing.tsx");
@@ -160,6 +160,30 @@ describe("Routing", () => {
     await flush();
     assert.deepEqual(alerts(m.host), ["The rules changed in the meantime. Reload the page and try again."]);
     assert.equal(items(m.host).length, 4);
+    await m.unmount();
+  });
+});
+
+describe("Delivery target", () => {
+  it("shows where approved records go (the company area by default) and the delivery counts; picking an area sends delivery_target_set", async () => {
+    reset();
+    const m = await mount(h(await page(), {}));
+    const box = within(m.host, "Delivery target");
+    assert.match(box.textContent ?? "", /Approved records go to Knowledge, area Company \(the shared company area, the default\)\./);
+    assert.match(box.textContent ?? "", /Deliveries: 3 sent, 1 waiting, 0 held for approval, 1 failed\./);
+    await choose(box, box.querySelector('[role="combobox"]') as Element, "Scout (own memory) (read only for Observer)");
+    const set = lastCall("delivery_target_set");
+    assert.deepEqual(set.input, { area: "agt-scout" });
+    assertWriteHeaders(set);
+    await m.unmount();
+  });
+  it("says so when Knowledge is not available, and offers no picker", async () => {
+    reset();
+    stub.targets = ["connect"];
+    const m = await mount(h(await page(), {}));
+    const box = within(m.host, "Delivery target");
+    assert.match(box.textContent ?? "", /Knowledge is not available to Observer now\./);
+    assert.equal(box.querySelector('[role="combobox"]'), null);
     await m.unmount();
   });
 });

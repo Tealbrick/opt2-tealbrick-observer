@@ -22,7 +22,7 @@ describe("Settings", () => {
     assert.deepEqual(app(m.host, "Task Board"), ["optional", "available"]);
     assert.deepEqual(app(m.host, "Operator Inbox"), ["optional", "available"]);
     assert.ok(!m.host.querySelector(".tb-notice.needs-you"), "nothing is missing");
-    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /^Delivery to Knowledge, Task Board and Inbox starts in a later version\./);
+    assert.match(m.host.querySelector(".tb-notice")?.textContent ?? "", /^Observer delivers to Knowledge\. Delivery to Task Board and Inbox starts in a later version\./);
     await m.unmount();
   });
 

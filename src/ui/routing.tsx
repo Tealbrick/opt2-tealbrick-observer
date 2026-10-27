@@ -206,6 +206,54 @@ function RuleDialog({ rule, rules, sources, targets, onClose, onSaved }: { rule:
   );
 }
 
+/** Where delivered documents go: the Knowledge area the owner picked, or Knowledge's shared company area (delivery_target_get/set). */
+export function DeliveryTarget() {
+  const data = useLoad(async () => run("delivery_target_get", {}));
+  const { busy, error, act } = useAct();
+  const d = data.data;
+  const DEFAULT = "";
+  const pick = (value: string) =>
+    act(async () => {
+      await run("delivery_target_set", { area: value === DEFAULT ? null : value });
+      await data.reload();
+    });
+  const name = (id: string | null) => (id === null ? "none" : (d?.areas.find((a) => a.id === id)?.label ?? id));
+  return (
+    <section className="tb-card tb-stack" aria-label="Delivery target">
+      <h3>Delivery target</h3>
+      {data.error ? <LoadFailed message={data.error} retrying={data.loading} onRetry={() => void data.reload()} /> : null}
+      <Failure message={error} />
+      {d === null ? null : d.knowledgeMissing ? (
+        <p className="tb-soft">Knowledge is not available to Observer now. Records you approve wait in Activity until it is.</p>
+      ) : (
+        <>
+          <p className="tb-soft">
+            Approved records go to Knowledge, area <strong>{name(d.effectiveArea)}</strong>
+            {d.area === null ? " (the shared company area, the default)" : ""}. A document Observer delivered before stays where it is and is updated there.
+          </p>
+          {d.error ? <p className="tb-hint">{d.error}</p> : null}
+          {d.areas.length > 0 ? (
+            <Field label="Knowledge area" hint="Observer can write only where Knowledge lets it. An area marked read only refuses the documents.">
+              <Select
+                value={d.area ?? DEFAULT}
+                disabled={busy}
+                onValueChange={(v) => void pick(v)}
+                options={[
+                  { value: DEFAULT, label: "Company area (default)" },
+                  ...d.areas.map((a) => ({ value: a.id, label: `${a.label}${a.access === "read" ? " (read only for Observer)" : ""}` })),
+                ]}
+              />
+            </Field>
+          ) : null}
+          <span className="meta">
+            Deliveries: {d.counts.sent} sent, {d.counts.pending} waiting, {d.counts.held} held for approval, {d.counts.failed} failed. See Activity.
+          </span>
+        </>
+      )}
+    </section>
+  );
+}
+
 export function RoutingPage() {
   const data = useLoad(async () => {
     const [rules, sources] = await Promise.all([run("rules_list", {}), run("sources_list", {})]);
@@ -244,6 +292,7 @@ export function RoutingPage() {
         </Button>
       </PageHead>
       <RequiredApps targets={d?.targets ?? null} />
+      <DeliveryTarget />
       <Failure message={deleting ? null : error} />
       {data.error ? <LoadFailed message={data.error} retrying={data.loading} onRetry={() => void data.reload()} /> : null}
       {d === null ? (

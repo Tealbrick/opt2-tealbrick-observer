@@ -126,7 +126,7 @@ export function RequiredApps({ targets }: { targets: readonly string[] | null })
       <span>
         <strong>Observer needs Connect and Knowledge to work.</strong> {missing.join(" and ")} {missing.length === 1 ? "is" : "are"} not available to it now. Task Board and Operator Inbox are optional.
         {missing.includes("Knowledge") ? " To connect Knowledge: in Portal, add Knowledge to this workspace and give it a licence. Observer connects to it by itself." : ""}
-        {missing.includes("Connect") ? " Connect: Observer can read sources only when Connect offers shared data access, in a later Connect version. You need to do nothing now." : ""}
+        {missing.includes("Connect") ? " To connect Connect: in Portal, add Connect to this workspace and give it a licence, then share an account with Observer in Connect." : ""}
       </span>
     </Notice>
   );

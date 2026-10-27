@@ -1,7 +1,7 @@
 // Sources page (src/ui/sources.tsx, addsource.tsx, history.tsx) against the real SDK client and the stub server.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, flush, h, lastCall, mount, openDialog, reset, SRC_NEW, stub, type } from "./ui-harness.ts";
+import { ACME_MCP, alerts, assertWriteHeaders, callsOf, choose, click, compileUi, control, flush, h, lastCall, mount, openDialog, reset, SRC_NEW, stub, type } from "./ui-harness.ts";
 
 const ui = compileUi("sources");
 type Sources = typeof import("../src/ui/sources.tsx");
@@ -263,7 +263,7 @@ describe("Add source", () => {
     assert.equal(callsOf("source_add").length, 0, "nothing is made before the owner presses Add source");
     await next(dialog, "Add source");
     const add = lastCall("source_add");
-    assert.deepEqual(add.input, { account: "acc_gmail", conversations: ["clients"], label: "Work inbox", exclude: { senders: ["doctor@clinic.example"], domains: ["family.example", "clinic.example"] }, liveIntervalS: 60, retentionDays: 30 });
+    assert.deepEqual(add.input, { account: "acc_gmail", dataset: "messages", conversations: ["clients"], label: "Work inbox", exclude: { senders: ["doctor@clinic.example"], domains: ["family.example", "clinic.example"] }, liveIntervalS: 60, retentionDays: 30 });
     assertWriteHeaders(add);
     assert.equal(done, 1, "the list reloads");
     // step 4: history
@@ -352,6 +352,33 @@ describe("Add source", () => {
       assert.deepEqual(alerts(dialog), [text], code);
       await m.unmount();
     }
+  });
+
+  it("an account with documents: the owner picks Documents, then collections; source_add says dataset documents; no history step", async () => {
+    reset();
+    stub.accounts = [ACME_MCP];
+    const m = await mountFlow();
+    const dialog = openDialog(m.host);
+    await click(dialog.querySelector('[role="radio"]') as Element);
+    await flush();
+    assert.equal(lastCall("sources_available").input.account, "acc_acme");
+    const radios = [...step(dialog, 0).querySelectorAll('[role="radio"]')];
+    const docs = radios.find((r) => r.textContent?.includes("Documents"));
+    assert.ok(docs, "the dataset choice is offered when the account has both");
+    await click(docs as Element);
+    await flush();
+    assert.equal(lastCall("sources_available").input.dataset, "documents");
+    assert.match(step(dialog, 0).textContent ?? "", /2 collections\. Observer reads every document of the chosen collections when you press Start live/);
+    await next(dialog);
+    assert.match(step(dialog, 1).textContent ?? "", /Which collections may Observer read\?/);
+    assert.match(step(dialog, 1).textContent ?? "", /About 12 documents\./);
+    await click(step(dialog, 1).querySelector('input[type="checkbox"]') as Element);
+    await next(dialog);
+    await next(dialog, "Add source");
+    assert.deepEqual(lastCall("source_add").input, { account: "acc_acme", dataset: "documents", conversations: ["finance"], label: "Acme LLC mock sources", liveIntervalS: 60 });
+    assert.doesNotMatch(step(dialog, 3).textContent ?? "", /Estimate/, "no history read for documents");
+    assert.match(step(dialog, 3).textContent ?? "", /Observer reads every document/);
+    await m.unmount();
   });
 
   it("parseExclude sorts addresses, handles and domains", async () => {

@@ -80,8 +80,8 @@ describe("Connect-dependent ops without Connect (R3 missing)", () => {
 const FAKE: ConnectPort = {
   async accounts() {
     return [
-      { id: "acc_gmail_1", kind: "gmail", label: "work@example.com", historyCapable: true, retentionDays: null, conversations: [{ id: "inbox", title: "Inbox", estimate: 1200 }, { id: "projects", title: "Projects", estimate: 80 }] },
-      { id: "acc_tg_1", kind: "telegram", label: "bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "grp1", title: "Team", estimate: null }] },
+      { id: "acc_gmail_1", kind: "gmail", label: "work@example.com", dataset: "messages", datasets: ["messages"], historyCapable: true, retentionDays: null, conversations: [{ id: "inbox", title: "Inbox", estimate: 1200 }, { id: "projects", title: "Projects", estimate: 80 }] },
+      { id: "acc_tg_1", kind: "telegram", label: "bot", dataset: "messages", datasets: ["messages"], historyCapable: false, retentionDays: 30, conversations: [{ id: "grp1", title: "Team", estimate: null }] },
     ];
   },
   async account(id) {
@@ -93,6 +93,9 @@ const FAKE: ConnectPort = {
   // the anchor read of source_add / backfill_start (the job ticks are tested against the fake Connect in ingest-jobs.test.ts)
   async pull() {
     return { rows: [], invalid: 0, quarantined: 0, nextCursor: null, anchor: "anchor_1", exhausted: true, retryAfterS: null };
+  },
+  async pullDocuments() {
+    return { rows: [], invalid: 0, quarantined: 0, nextCursor: null, anchor: null, exhausted: true, retryAfterS: null };
   },
 };
 

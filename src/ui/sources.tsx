@@ -3,7 +3,7 @@
 import { Button, Dialog, EmptyState, Notice, Progress, Tag } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 import { AddSource } from "./addsource.tsx";
-import { asAccount, count, dateOf, type Job, keptSentence, kindName, plural, run, type Source, until } from "./api.ts";
+import { ago, asAccount, count, DOCUMENTS_SENTENCE, datasetName, dateOf, type Job, keptSentence, kindName, plural, run, type Source, unitName, until } from "./api.ts";
 import { ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useAct, useLoad } from "./common.tsx";
 import { HistoryDialog } from "./history.tsx";
 
@@ -36,6 +36,8 @@ function liveStatus(job: Job | undefined, source: Source): { tone: Tone; text: s
 const HISTORY_STATE: Record<string, string> = { queued: "queued", running: "reading", waiting: "waiting to retry", paused: "paused", failed: "stopped after failures", cancelled: "stopped", done: "done" };
 
 function History({ source, job }: { source: Source; job: Job | undefined }) {
+  // a documents source reads everything of its collections when it starts: there is no history read
+  if (source.dataset === "documents") return <span className="tb-hint">{DOCUMENTS_SENTENCE}</span>;
   if (!job) {
     // what a source can read comes from Connect's catalog (stored at source_add), not from a list of services
     return source.historyCapable === false ? (
@@ -56,6 +58,17 @@ function History({ source, job }: { source: Source; job: Job | undefined }) {
       <span className="meta">{text}</span>
     </div>
   );
+}
+
+/** Last pull and counts of the live job, in one line (counts only, no text). */
+function readLine(source: Source, live: Job | undefined): string {
+  const what = source.dataset === "documents" ? "documents" : "messages";
+  if (!live) return "Nothing read yet.";
+  const last = source.live.lastReadAt ? `Last pull ${ago(source.live.lastReadAt)}` : "No pull yet";
+  const c = (live.counts ?? {}) as { read?: number; records?: number; skipped?: number };
+  const n = (v: number | undefined): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const skipped = n(c.skipped) > 0 ? ` · ${count(n(c.skipped))} skipped (not readable)` : "";
+  return `${last} · ${count(n(c.read))} ${what} stored · ${plural(n(c.records), "record")}${skipped}`;
 }
 
 function SourceCard({
@@ -86,7 +99,8 @@ function SourceCard({
         <div className="tb-stack ob-head">
           <h3>{source.label}</h3>
           <span className="meta">
-            {kindName(source.kind)} · {plural(source.conversations.length, "conversation")}
+            {kindName(source.kind)} · {source.dataset === "documents" ? `${datasetName("documents")} · ` : ""}
+            {plural(source.conversations.length, unitName(source.dataset ?? "messages"), unitName(source.dataset ?? "messages", true))}
           </span>
         </div>
       </div>
@@ -94,6 +108,10 @@ function SourceCard({
         <dt>Live</dt>
         <dd>
           <Tag status={l.tone}>{l.text}</Tag> <span className="tb-hint">{l.hint}</span>
+        </dd>
+        <dt>Read</dt>
+        <dd>
+          <span className="tb-hint">{readLine(source, live)}</span>
         </dd>
         <dt>History</dt>
         <dd>
@@ -137,7 +155,7 @@ function SourceCard({
           </Button>
         ) : null}
         {hist && ["queued", "running", "waiting", "paused"].includes(hist.state) ? <ConfirmButton label="Stop history" confirmLabel="Confirm: stop history" disabled={busy} onConfirm={() => onJob(hist, "cancel")} /> : null}
-        {!hist || hist.state === "cancelled" || hist.state === "done" ? (
+        {source.dataset !== "documents" && (!hist || hist.state === "cancelled" || hist.state === "done") ? (
           <Button size="sm" disabled={busy} onClick={() => onHistory(source)}>
             Read history…
           </Button>

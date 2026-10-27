@@ -143,7 +143,7 @@ export function listJobs(db: Db, source: string | undefined, limit = 200): JobVi
  * transition the handler calls `syncSdkJob`, and each tick reads this state before every pull (a paused or cancelled job never
  * pulls again). The tick moves queued → running → waiting/done/failed.
  */
-export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number, reanchor?: { anchor: string | null; at: number }): { row: Row; changed: boolean } {
+export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now: number, reanchor?: { anchor: string | null; at: number; fromStart?: boolean }): { row: Row; changed: boolean } {
   const state = str(r.state) as JobState;
   const liveReset = action === "resume" && state === "failed" && r.kind === "live" && r.error_code === "cursor_invalid";
   if (liveReset && !reanchor) throw new TbError("reanchor_required", "a live job whose reading position Connect refused restarts from a fresh anchor", 409);
@@ -184,7 +184,11 @@ export function transitionJob(db: Db, r: Row, action: JobAction, by: string, now
         reset ? ", cursor = CASE WHEN error_code = 'cursor_invalid' AND kind = 'backfill' THEN NULL ELSE cursor END, consecutive_failures = 0, last_error = NULL, error_code = NULL, retry_at = NULL" : ""
       } WHERE id = ?`,
     ).run(next, pausedBy, now, str(r.id));
-    if (liveReset && reanchor) {
+    if (liveReset && reanchor?.fromStart) {
+      // a documents source reads its collections again from Connect's start: every document is read again, and a revision Observer
+      // already has is unchanged (documents.ts), so nothing is missed and nothing doubles
+      db.prepare("UPDATE obs_jobs SET cursor = NULL, anchor = NULL, anchor_at = ? WHERE id = ?").run(reanchor.at, str(r.id));
+    } else if (liveReset && reanchor) {
       // the gap is said honestly: from the last time the job was CAUGHT UP (a page came back exhausted; else its old anchor) to
       // the fresh anchor. A gap that is still open is kept: the span only grows until a history read covers it.
       const caught = r.caught_up_at ?? r.anchor_at;
@@ -208,6 +212,8 @@ export interface SourceView {
   conversations: string[];
   live: { state: string; lastReadAt: string | null; nextAt: string | null };
   history: { state: string; done: number; total: number | null; since: string | null };
+  /** the Connect dataset: messages (conversations) or documents (`conversations` are then the chosen collections) */
+  dataset: "messages" | "documents";
   /** Connect can page further back than what it kept */
   historyCapable: boolean;
   /** days Connect keeps the account's messages (null: it did not say) */
@@ -273,6 +279,7 @@ function sourceParts(db: Db, r: Row): { view: SourceView; liveJobId: string | nu
         total: hist && hist.max_messages !== null ? Number(hist.max_messages) : null,
         since: hist ? iso(hist.since_at) : null,
       },
+      dataset: r.dataset === "documents" ? "documents" : "messages",
       historyCapable: Number(r.history_capable) === 1,
       keptDays: r.kept_days === null || r.kept_days === undefined ? null : Number(r.kept_days),
     },
@@ -315,6 +322,8 @@ export interface NewSource {
   historyCapable: boolean;
   /** days Connect keeps the account's messages (data_catalog retentionDays) */
   keptDays: number | null;
+  /** the Connect dataset (default messages) */
+  dataset?: "messages" | "documents";
   /** Connect's head position, captured BEFORE the job exists (null: the log was empty); the live job reads forward from it */
   anchor: string | null;
   anchorAt: number;
@@ -326,9 +335,9 @@ export function createSource(db: Db, s: NewSource, now: number): { source: strin
   const job = `job_${ulid(now)}`;
   db.transaction(() => {
     db.prepare(
-      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, kept_days, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, s.keptDays, now, now);
+      `INSERT INTO obs_sources (id, account, kind, label, conversations_json, exclude_json, live_interval_s, retention_days, history_capable, kept_days, dataset, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(source, s.account, s.kind, s.label, JSON.stringify(s.conversations), JSON.stringify(s.exclude), s.liveIntervalS, s.retentionDays, s.historyCapable ? 1 : 0, s.keptDays, s.dataset ?? "messages", now, now);
     db.prepare(
       `INSERT INTO obs_jobs (id, source_id, kind, state, paused_by, cursor, anchor, anchor_at, created_at, updated_at) VALUES (?, ?, 'live', 'paused', NULL, ?, ?, ?, ?, ?)`,
     ).run(job, source, s.anchor, s.anchor, s.anchorAt, now, now);
@@ -430,6 +439,13 @@ export function dropOutOfScope(db: Db, sourceId: string, removedConversations: s
     const del = db.prepare("DELETE FROM obs_messages WHERE source_id = ? AND conversation = ? AND provider_msg_id = ?");
     for (const m of doomed.values()) del.run(sourceId, m.conversation, m.id);
     scrubRecords(db, [...doomed.values()].flatMap((m) => (m.record ? [m.record] : [])), "narrow", now);
+    // documents: forget the ones of a removed collection, and the ones whose record went (an excluded author), so a source that
+    // is widened again reads them again
+    if (removedConversations.length > 0) {
+      const marks = removedConversations.map(() => "?").join(", ");
+      db.prepare(`DELETE FROM obs_documents WHERE source_id = ? AND collection IN (${marks})`).run(sourceId, ...removedConversations);
+    }
+    db.prepare("DELETE FROM obs_documents WHERE source_id = ? AND record_id IS NOT NULL AND record_id NOT IN (SELECT id FROM obs_records)").run(sourceId);
     return doomed.size;
   });
 }
@@ -454,6 +470,7 @@ export function removeSource(db: Db, id: string, now: number): { messagesPurged:
     db.prepare(`DELETE FROM obs_deliveries WHERE record_id IN ${records}`).run(id);
     db.prepare("DELETE FROM obs_records WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_messages WHERE source_id = ?").run(id);
+    db.prepare("DELETE FROM obs_documents WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_jobs WHERE source_id = ?").run(id);
     db.prepare("DELETE FROM obs_sources WHERE id = ?").run(id);
     return { messagesPurged, sdkJobs };

@@ -102,7 +102,7 @@ export const DELIVERIES = [
   delivery("dlv_sent", "rec_bank", "knowledge", "sent", { targetRef: "doc_1" }),
   delivery("dlv_pending", "rec_plain", "kanban", "pending"),
   delivery("dlv_held", "rec_key", "inbox", "held", { holdId: "hld_1" }),
-  delivery("dlv_failed", "rec_bank", "knowledge", "failed", { nextAt: iso(NOW + 40 * 60_000), lastError: "raw upstream text must never show", warning: "may_duplicate: the first attempt was more than 23 hours ago" }),
+  delivery("dlv_failed", "rec_bank", "knowledge", "failed", { nextAt: iso(NOW + 40 * 60_000), lastError: "Knowledge refused: Observer may not write to this area. Give Observer write access to the area in Knowledge, or pick another area on Routing, then press Retry.", warning: "may_duplicate: the first attempt was more than 23 hours ago" }),
   delivery("dlv_super", "rec_key", "knowledge", "held", { holdId: "hld_2", superseded: true }),
 ];
 export const PRIVACY = { textRetentionDays: 30, reviewRetentionDays: 90, onSourceDelete: "purge" };
@@ -110,6 +110,12 @@ export const ACCOUNTS = [
   { id: "acc_gmail", kind: "gmail", label: "work@example.com", historyCapable: true, retentionDays: null, conversations: [{ id: "clients", title: "Label “Clients”", estimate: 28500 }, { id: "suppliers", title: "Label “Suppliers”", estimate: 4100 }, { id: "all", title: "Inbox (all mail)", estimate: null }] },
   { id: "acc_tg", kind: "telegram", label: "Front desk bot", historyCapable: false, retentionDays: 30, conversations: [{ id: "group", title: "Clinic partners", estimate: null }] },
 ];
+/** An account with both datasets (an MCP account of the Acme mock sources): the answer depends on the dataset asked for. */
+export const ACME_MCP = { id: "acc_acme", kind: "mcp", label: "Acme LLC mock sources" };
+export const acmeAs = (dataset: string) =>
+  dataset === "documents"
+    ? { ...ACME_MCP, dataset: "documents", datasets: ["messages", "documents"], historyCapable: false, retentionDays: null, conversations: [{ id: "finance", title: "Finance", estimate: 12 }, { id: "public.orders", title: "public.orders", estimate: 40 }] }
+    : { ...ACME_MCP, dataset: "messages", datasets: ["messages", "documents"], historyCapable: false, retentionDays: 30, conversations: [{ id: "support", title: "#support", estimate: 9 }] };
 
 // ── stub server ────────────────────────────────────────────────────────────
 export interface Call {
@@ -138,6 +144,9 @@ export interface Stub {
   deliveries: unknown[];
   accounts: unknown[];
   privacy: Record<string, unknown>;
+  /** the owner's delivery area (null: the company area) */
+  area: string | null;
+  knowledgeAreas: { id: string; label: string; kind: string; access: string }[];
 }
 export const stub = {} as Stub;
 export function reset(): void {
@@ -157,6 +166,11 @@ export function reset(): void {
     deliveries: structuredClone(DELIVERIES),
     accounts: structuredClone(ACCOUNTS),
     privacy: { ...PRIVACY },
+    area: null,
+    knowledgeAreas: [
+      { id: "company", label: "Company", kind: "shared", access: "read_write" },
+      { id: "agt-scout", label: "Scout (own memory)", kind: "agent", access: "read" },
+    ],
   });
 }
 reset();
@@ -171,6 +185,7 @@ function answer(op: string, input: Record<string, any>): unknown {
     case "sources_available":
       // like the server: the list names the accounts only; one account comes with its catalog
       if (stub.connectMissing) return { accounts: [], connectMissing: true, targets: stub.targets };
+      if (input.account === ACME_MCP.id) return { accounts: [acmeAs(input.dataset ?? "messages")], connectMissing: false, targets: stub.targets };
       if (input.account) return { accounts: (stub.accounts as { id: string }[]).filter((a) => a.id === input.account), connectMissing: false, targets: stub.targets };
       return { accounts: (stub.accounts as { id: string; kind: string; label: string }[]).map(({ id, kind, label }) => ({ id, kind, label })), connectMissing: false, targets: stub.targets };
     case "sources_list":
@@ -180,7 +195,7 @@ function answer(op: string, input: Record<string, any>): unknown {
     case "job_control":
       return { job: { ...(stub.jobs as { id: string }[]).find((j) => j.id === input.id), state: "queued" } };
     case "source_add":
-      return { source: { ...SRC_NEW, id: "src_made", label: input.label, account: input.account, conversations: input.conversations } };
+      return { source: { ...SRC_NEW, id: "src_made", label: input.label, account: input.account, conversations: input.conversations, dataset: input.dataset ?? "messages" } };
     case "backfill_estimate":
       return { messages: 1200, records: 140, durationS: 600, providerNote: null };
     case "backfill_start":
@@ -219,6 +234,20 @@ function answer(op: string, input: Record<string, any>): unknown {
       return stub.privacy;
     case "purge":
       return { purged: 7 };
+    case "delivery_target_get": {
+      const missing = !stub.targets.includes("knowledge");
+      return {
+        area: stub.area,
+        effectiveArea: stub.area ?? "company",
+        areas: missing ? [] : stub.knowledgeAreas,
+        knowledgeMissing: missing,
+        error: null,
+        counts: { pending: 1, held: 0, sent: 3, failed: 1 },
+      };
+    }
+    case "delivery_target_set":
+      stub.area = input.area;
+      return { area: input.area };
     default:
       return {};
   }

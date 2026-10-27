@@ -78,7 +78,7 @@ test("boots on the SDK, serves derived routes, creates its tables and rule 0", a
 });
 
 test("every op has one handler, the agent ops are exactly status, job_pause and flag, and no op is the template's items", () => {
-  assert.equal(Object.keys(handlers).length, 28);
+  assert.equal(Object.keys(handlers).length, 30);
   assert.ok(!("items_list" in handlers) && !("item_create" in handlers));
   assert.deepEqual(manifest.operations.filter((o) => o.audience === "agent").map((o) => o.id).sort(), ["flag", "job_pause", "status"]);
 });

@@ -69,7 +69,7 @@ describe("the Connect companion is exactly read-only data ops", () => {
     const c = (manifest.companions ?? []).filter((x) => x.product === "connect");
     assert.deepEqual(
       c.map((x) => ({ product: x.product, operations: x.operations, crud: x.crud, purpose: (x as { purpose?: string }).purpose })),
-      [{ product: "connect", operations: ["data_accounts_list", "data_catalog", "data_pull"], crud: ["read"], purpose: "Read the conversations you shared with Observer. Read only: Observer cannot send, edit or delete." }],
+      [{ product: "connect", operations: ["data_accounts_list", "data_catalog", "data_pull"], crud: ["read"], purpose: "Read the conversations and document collections you shared with Observer. Read only: Observer cannot send, edit or delete." }],
     );
   });
   it("quiet on good: the real one; the full set; a subset; always crud exactly [read]", () => {

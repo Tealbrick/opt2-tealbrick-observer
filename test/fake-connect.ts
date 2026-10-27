@@ -22,6 +22,9 @@ type Schema = Parameters<typeof validateAgainstSchema>[0];
 const SCHEMA = JSON.parse(readFileSync(new URL("./contracts/messages.1.schema.json", import.meta.url), "utf8")) as Record<string, unknown>;
 const PAGE = SCHEMA as unknown as Schema;
 const ROW = { $schema: SCHEMA.$schema, $defs: SCHEMA.$defs, $ref: "#/$defs/row" } as unknown as Schema;
+const DOC_SCHEMA = JSON.parse(readFileSync(new URL("./contracts/documents.1.schema.json", import.meta.url), "utf8")) as Record<string, unknown>;
+const DOC_PAGE = DOC_SCHEMA as unknown as Schema;
+const DOC_ROW = { $schema: DOC_SCHEMA.$schema, $defs: DOC_SCHEMA.$defs, $ref: "#/$defs/row" } as unknown as Schema;
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u;
 
 export interface FakeAccount {
@@ -36,6 +39,42 @@ export interface FakeAccount {
   /** when the share began (epoch ms); pulls return only rows received at or after it unless includeHistory */
   setAt: number;
   includeHistory: boolean;
+  /** the datasets the catalog lists (default: messages only) */
+  datasets: ("messages" | "documents")[];
+  /** the collections of the documents dataset */
+  collections: { id: string; name: string }[];
+}
+
+/** One stored revision of a document (the documents log is append-only: a change is a new entry with the next rev). */
+interface DocLogRow {
+  seq: number;
+  collection: string;
+  id: string;
+  title: string;
+  text: string;
+  rev: string;
+  updatedAt: number;
+  deleted: boolean;
+  kind?: "document" | "chat_transcript" | "table" | "report" | "record";
+  mime: "text/plain" | "text/markdown" | "text/csv";
+  author?: { handle: string; raw?: boolean; display?: string };
+  url?: string;
+  path?: string;
+  broken: boolean;
+}
+export interface DocPut {
+  collection: string;
+  id: string;
+  title: string;
+  text: string;
+  updatedAt: number;
+  kind?: DocLogRow["kind"];
+  mime?: DocLogRow["mime"];
+  author?: DocLogRow["author"];
+  url?: string;
+  path?: string;
+  /** a stored row Connect cannot turn into a conforming documents/1 row (quarantined) */
+  broken?: boolean;
 }
 
 interface LogRow {
@@ -78,6 +117,7 @@ const enc = (account: string, rev: number): string => Buffer.from(`fake:${accoun
 export class FakeConnect {
   readonly accounts = new Map<string, FakeAccount>();
   readonly logs = new Map<string, LogRow[]>();
+  readonly docLogs = new Map<string, DocLogRow[]>();
   /** the verified product of the caller as the SDK gives it (ctx.caller.product); null = an app without one */
   callerProduct: string | null = "observer";
   /** the product the owner shared the accounts with */
@@ -105,10 +145,13 @@ export class FakeConnect {
       ],
       setAt: 0,
       includeHistory: true,
+      datasets: ["messages"],
+      collections: [],
       ...a,
     };
     this.accounts.set(full.id, full);
     this.logs.set(full.id, this.logs.get(full.id) ?? []);
+    this.docLogs.set(full.id, this.docLogs.get(full.id) ?? []);
     return full;
   }
 
@@ -161,6 +204,19 @@ export class FakeConnect {
     const old = this.#last(account, conversation, id);
     return this.#change(account, old, { text: "", attachments: [], deleted: true });
   }
+  /** a new document or a new revision of one (the next seq; rev changes with the text) */
+  putDoc(account: string, d: DocPut): string {
+    const seq = this.#nextRev(account);
+    const rev = `r${seq}`;
+    (this.docLogs.get(account) as DocLogRow[]).push({ seq, collection: d.collection, id: d.id, title: d.title, text: d.text, rev, updatedAt: d.updatedAt, deleted: false, mime: d.mime ?? "text/markdown", broken: d.broken ?? false, ...(d.kind ? { kind: d.kind } : {}), ...(d.author ? { author: d.author } : {}), ...(d.url ? { url: d.url } : {}), ...(d.path ? { path: d.path } : {}) });
+    return rev;
+  }
+  /** a source deletion: a new entry, deleted, empty text, title "" */
+  deleteDoc(account: string, collection: string, id: string, at: number): string {
+    const seq = this.#nextRev(account);
+    (this.docLogs.get(account) as DocLogRow[]).push({ seq, collection, id, title: "", text: "", rev: `r${seq}`, updatedAt: at, deleted: true, mime: "text/plain", broken: false });
+    return `r${seq}`;
+  }
   fail(op: string, code: string, status: number, times = 1): void {
     for (let i = 0; i < times; i++) this.faults.push({ op, error: { code, status } });
   }
@@ -211,7 +267,7 @@ export class FakeConnect {
 
   #accountsList(): Record<string, unknown> {
     const product = this.#caller();
-    const accounts = product === this.sharedWith ? [...this.accounts.values()].map((a) => ({ account: a.id, service: a.service, label: a.label, kinds: ["messages"], level: a.level })) : [];
+    const accounts = product === this.sharedWith ? [...this.accounts.values()].map((a) => ({ account: a.id, service: a.service, label: a.label, kinds: a.datasets.map((d) => (d === "documents" ? "object" : d)), level: a.level })) : [];
     return { accounts };
   }
 
@@ -228,6 +284,7 @@ export class FakeConnect {
       label: a.label,
       level: a.level,
       datasets: [
+        ...(a.datasets.includes("documents") ? [this.#docCatalog(a)] : []),
         {
           dataset: "messages",
           title: "Messages",
@@ -242,7 +299,7 @@ export class FakeConnect {
           ...(oldest !== null ? { oldestAt: iso(oldest) } : {}),
           conversations: a.conversations.map((c) => ({ ...c, approxRows: live.filter((r) => r.conversation === c.id).length })),
         },
-      ],
+      ].filter((d) => d.dataset !== "messages" || a.datasets.includes("messages")),
       untrusted: true,
     };
   }
@@ -272,8 +329,72 @@ export class FakeConnect {
     return { ...base, text: r.text, attachments: r.attachments, ...(r.truncated ? { truncated: true } : {}) };
   }
 
+  #docCatalog(a: FakeAccount): Record<string, unknown> {
+    const latest = new Map<string, DocLogRow>();
+    for (const r of this.docLogs.get(a.id) ?? []) latest.set(`${r.collection}\u0000${r.id}`, r);
+    const live = [...latest.values()].filter((r) => !r.deleted);
+    return {
+      dataset: "documents",
+      title: "Documents",
+      kind: "object",
+      delivery: "pull",
+      contract: "documents/1",
+      approxRows: live.length,
+      history: false,
+      collections: a.collections.map((c) => ({ ...c, approxRows: live.filter((r) => r.collection === c.id).length })),
+    };
+  }
+
+  #docRow(r: DocLogRow): Record<string, unknown> {
+    return {
+      id: r.id,
+      collection: r.collection,
+      title: r.title,
+      mime: r.mime,
+      updatedAt: iso(r.updatedAt),
+      rev: r.rev,
+      ...(r.deleted ? { deleted: true } : {}),
+      ...(r.author ? { author: r.author } : {}),
+      ...(r.kind ? { kind: r.kind } : {}),
+      ...(r.url ? { url: r.url } : {}),
+      ...(r.path ? { path: r.path } : {}),
+      text: r.text,
+      untrusted: true,
+      // a broken stored row: what Connect could not turn into a conforming row
+      ...(r.broken ? { mime: "text/html" } : {}),
+    };
+  }
+
+  /** documents: forward only, in seq order, at most 50 rows; the same cursor and envelope rules as messages */
+  #pullDocs(a: FakeAccount, i: Record<string, unknown>, retryAfterS: number | null): Record<string, unknown> {
+    const cursor = typeof i.cursor === "string" ? i.cursor : null;
+    const at = cursor === null ? null : this.#decode(cursor, a.id);
+    const limit = Math.max(1, Math.min(50, typeof i.limit === "number" ? Math.trunc(i.limit) : 50));
+    let page: Record<string, unknown>;
+    if (retryAfterS !== null) page = { rows: [], nextCursor: cursor, exhausted: false, retryAfterS };
+    else {
+      const fetched = (this.docLogs.get(a.id) ?? []).filter((r) => at === null || r.seq > at).slice(0, limit + 1);
+      const taken = fetched.slice(0, limit);
+      const rows: Record<string, unknown>[] = [];
+      let quarantined = 0;
+      let last: number | null = null;
+      for (const r of taken) {
+        const row = this.#docRow(r);
+        if (r.broken || !validateAgainstSchema(DOC_ROW, row as Json).ok) quarantined += 1;
+        else rows.push(row);
+        last = r.seq;
+      }
+      page = { rows, nextCursor: last !== null ? enc(a.id, last) : cursor, exhausted: taken.length === fetched.length, ...(quarantined > 0 ? { quarantined } : {}) };
+    }
+    this.drift?.(page);
+    const checked = validateAgainstSchema(DOC_PAGE, page as Json);
+    if (!checked.ok) throw new Error(`fake Connect drifted from documents/1: ${JSON.stringify(checked.errors.slice(0, 3))}`);
+    return { ...page, schema: "documents/1", untrusted: true };
+  }
+
   #pull(i: Record<string, unknown>, retryAfterS: number | null): Record<string, unknown> {
     const a = this.#account(i.account, "shared");
+    if (i.dataset === "documents" && a.datasets.includes("documents")) return this.#pullDocs(a, i, retryAfterS);
     if (i.dataset !== "messages") throw new TbError("not_found", "No such dataset on this account.", 404);
     const direction = i.direction === "backward" ? "backward" : "forward";
     const cursor = typeof i.cursor === "string" ? i.cursor : null;

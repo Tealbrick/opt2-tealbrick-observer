@@ -13,6 +13,7 @@
 import { validateAgainstSchema } from "@opt2-tealbrick/manifest";
 import type { Json } from "@opt2-tealbrick/miniapp-sdk";
 import { TbError } from "@opt2-tealbrick/miniapp-sdk";
+import docSchema from "./contracts/documents.1.schema.json" with { type: "json" };
 import schema from "./contracts/messages.1.schema.json" with { type: "json" };
 import type { IncomingMessage } from "./ingest.ts";
 
@@ -103,4 +104,71 @@ export function toIncoming(row: MessageRow): IncomingMessage {
     authorKind: row.author.kind,
     text: deleted ? "" : row.text,
   };
+}
+
+// ───────────────────────────────────────────────────────────────────────── documents/1 (DRAFT, C373)
+// One page of Connect's `documents` dataset: MCP resources and database table pages (CSV), one row per document. The byte copy and
+// its source are in test/contracts/PROVENANCE.md. Same reader rules as messages/1: strict on the envelope, tolerant per row. A row
+// carries no account (the account is the source's own). Consumers strip control, bidi and zero-width characters before display or
+// indexing: `cleanText` does that before Observer stores anything.
+export const DOCUMENTS_CONTRACT = "documents/1";
+export const DOCUMENTS_DATASET = "documents";
+export const DATASETS = [MESSAGES_DATASET, DOCUMENTS_DATASET] as const;
+export type Dataset = (typeof DATASETS)[number];
+export const isDataset = (v: unknown): v is Dataset => v === MESSAGES_DATASET || v === DOCUMENTS_DATASET;
+
+export const DOC_ROW_SCHEMA = { $schema: docSchema.$schema, $defs: docSchema.$defs, $ref: "#/$defs/row" } as unknown as Schema;
+export const DOC_PAGE_SCHEMA = docSchema as unknown as Schema;
+/** documents/1 allows at most 50 rows per page */
+export const DOC_PAGE_MAX = 50;
+
+export interface DocumentRow {
+  id: string;
+  collection: string;
+  title: string;
+  path?: string;
+  url?: string;
+  mime: "text/plain" | "text/markdown" | "text/csv";
+  updatedAt: string;
+  rev: string;
+  deleted?: boolean;
+  author?: { handle: string; raw?: boolean; display?: string };
+  kind?: "document" | "chat_transcript" | "table" | "report" | "record";
+  text: string;
+  untrusted: true;
+  truncated?: boolean;
+}
+export interface DocPage {
+  rows: DocumentRow[];
+  invalid: number;
+  quarantined: number;
+  nextCursor: string | null;
+  anchor: string | null;
+  exhausted: boolean;
+  retryAfterS: number | null;
+}
+
+export function docRowConforms(row: unknown): row is DocumentRow {
+  return validateAgainstSchema(DOC_ROW_SCHEMA, row as Json).ok;
+}
+
+/** Read a data_pull answer of the documents dataset: the same envelope rules as readPage, rows checked against documents/1. */
+export function readDocPage(out: unknown): DocPage {
+  if (!isObj(out) || !Array.isArray(out.rows)) throw contract("rows");
+  const env = readPage({ ...out, rows: [] });
+  const rows: DocumentRow[] = [];
+  let invalid = 0;
+  for (const r of (out as { rows: unknown[] }).rows) {
+    if (docRowConforms(r)) rows.push(r);
+    else invalid += 1;
+  }
+  return { rows, invalid, quarantined: env.quarantined, nextCursor: env.nextCursor, anchor: env.anchor, exhausted: env.exhausted, retryAfterS: env.retryAfterS };
+}
+
+/** Control characters (except tab, line feed, carriage return) and format characters (bidi controls, zero-width marks) removed:
+ *  what the contract asks consumers to do before display or indexing. */
+const INVISIBLE = /[\p{Cc}\p{Cf}\u2028\u2029]/gu;
+const KEPT = new Set(["\t", "\n", "\r"]);
+export function cleanText(v: string): string {
+  return v.replace(INVISIBLE, (c) => (KEPT.has(c) ? c : ""));
 }
