@@ -63,7 +63,7 @@ export interface DocResult {
 }
 
 /** The chunk message id of piece `n` of a document. Zero-padded: records order their messages by (sent time, id), and every
- *  chunk of a document has the same time, so "#010" must sort after "#009" (a 256 Ki-character document has at most ~75 chunks). */
+ *  chunk of a document has the same time, so piece 10 ("0010") must sort after piece 9 ("0009") (a 256 Ki-character document has at most ~75 chunks). */
 export const chunkId = (docId: string, n: number): string => `${docId}#${String(n).padStart(4, "0")}`;
 
 /**
