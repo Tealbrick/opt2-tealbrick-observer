@@ -1,0 +1,76 @@
+{
+  "adaptations_excerpt": "---\ntitle: Tealbrick adaptations (local delta from upstream)\nproject: tealbrick\nkind: adaptations\ncreated: 2026-10-11\nupdated: 2026-10-16\nstatus: current\nauthority: \"DECISION-LOG C6, C27, C53, C54, C61, C66, C130, C155, C157, C186; per-repo THIRD_PARTY_NOTICES\"\n---\n# Adaptations\nHow our use differs from upstream assumptions. Provenance is in\n[upstream-map.md](upstream-map.md). Details per app are ",
+  "backend": "forgejo",
+  "current_state_excerpt": "---\ntitle: Tealbrick current state\nproject: tealbrick\nkind: state\ncreated: 2026-10-11\nupdated: 2026-10-22\nstatus: current\nauthority: \"DECISION-LOG C1-C308; RAILWAY-INCIDENT-ROTATION-2026-10-22.md; INCIDENTS.md; RESUME-2026-10-21.md; roadmap/SPRINT-S1-OWN-VPS.md; roadmap/WP-C307-HEADLESS-SELF-HOSTED.md; HANDOFF section 0; MORNING-2026-10-17.md; releases/RS-1*.json, RS-2*.json and RS-3*.json; qa/VER",
+  "docs_root": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo",
+  "index_summary": {
+    "counts": {
+      "adaptations": 27,
+      "current-state": 29,
+      "daily": 6,
+      "decision": 38,
+      "devlog": 133,
+      "note": 170,
+      "runbook": 79,
+      "spec": 28,
+      "upstream-map": 26
+    },
+    "indexed_at": "2026-11-01T01:47:36"
+  },
+  "project": "tealbrick",
+  "recent_devlog_excerpt": "---\ntitle: 2026-10-22 - Own VPS path decided, Openship locked as the engine, Sprint S1 queued\nproject: tealbrick\nkind: devlog\ncreated: 2026-10-22T12:00:00\n---\nSnapshot of 2026-10-22 (C300 to C308), from the Coordinator records. Current facts: [../current-state.md](../current-state.md). Next steps: [../roadmap.md](../roadmap.md). Plan files are operator paths under `/Users/puma/work/active/tealbric",
+  "recorded_at": "2026-11-01T01:47:36",
+  "related": [
+    {
+      "doc_id": "daily/2026-09.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/daily/2026-09.md",
+      "score": 1012.0,
+      "snippet": "or the entire Doppelganger LABS ecosystem. Domain tealbrick.com is owned by the operator and managed via Cloudflare (user-reported; access and zone not independently verified here). Phase 1: owned, coherently rebranded K...",
+      "title": "Daily Notes 2026-09",
+      "url": null
+    },
+    {
+      "doc_id": "daily/2026-10.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/daily/2026-10.md",
+      "score": 848.0,
+      "snippet": "d in notes/2026-10-01-agent-dx.md with execution, Tealbrick and provider evidence reports. User explicitly rejects a head coordinator: directly addressed scoped specialists via Buzz, fixed project/runtime bindings, Tealb...",
+      "title": "Daily Notes 2026-10",
+      "url": null
+    },
+    {
+      "doc_id": "projects/tealbrick/decisions/prd-v2-decision-log.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/projects/tealbrick/decisions/prd-v2-decision-log.md",
+      "score": 752.0,
+      "snippet": "--- title: Tealbrick opt2 decision log (C1-C308) project: tealbrick kind: decision created: 2026-10-11T14:54:44 updated: 2026-10-22 status: current --- > Synced 2026-10-22 12:10 UTC from the source of truth `coordination...",
+      "title": "Teal Brick PRD v2 \u2014 decision log (drilldown with Martin, started 2026-10-11)",
+      "url": null
+    },
+    {
+      "doc_id": "projects/KBDE/makeover/work-ledger.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/projects/KBDE/makeover/work-ledger.md",
+      "score": 584.0,
+      "snippet": "nd decodes the response - Expected tests: `pnpm --filter @kyberagent/contracts test`; `pnpm --filter @kyberagent/daemon exec tsx src/proofs/verify-m1-contract-package-skeleton.ts`; `pnpm --filter @kyberagent/contracts ty...",
+      "title": "Makeover Work Ledger",
+      "url": null
+    },
+    {
+      "doc_id": "projects/KBDE/makeover/overnight-status.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/projects/KBDE/makeover/overnight-status.md",
+      "score": 304.0,
+      "snippet": "proof. - 2026-05-22T22:58:06+0700: Passed `pnpm --filter @kyberagent/contracts test`, `pnpm --filter @kyberagent/daemon exec tsx src/proofs/verify-m1-contract-package-skeleton.ts`, `pnpm --filter @kyberagent/contracts ty...",
+      "title": "Overnight Makeover Status",
+      "url": null
+    },
+    {
+      "doc_id": "projects/legacy-v1-portal-2026-09/decisions/tealbrick-miniapp-development-contract.md",
+      "path": "/Users/puma/work/working_on/home-helper/polygonface-docs-forgejo/projects/legacy-v1-portal-2026-09/decisions/tealbrick-miniapp-development-contract.md",
+      "score": 252.0,
+      "snippet": "e current Teal Brick product. Authority: projects/tealbrick/decisions/prd-v2-decision-log.md. > Rename note (2026-10-04): Doppelabs is now Tealbrick and Doppelganger branding is retired (now Teal Brick); names below are ...",
+      "title": "Teal Brick miniapp development contract (v1, accepted)",
+      "url": null
+    }
+  ],
+  "spec_excerpt": "---\ntitle: Tealbrick interface specs (summary)\nproject: tealbrick\nkind: spec\ncreated: 2026-10-11\nupdated: 2026-10-17\nstatus: current\nauthority: \"DECISION-LOG C19, C26, C35, C40a, C133; repo opt2-tealbrick-specs (docs/ and package @opt2-tealbrick/spec 0.1.39)\"\n---\n# Interface specs (summary)\nThe **frozen interface specs** are the contract between the components. They\nlive in the repo `opt2-tealbric",
+  "summary": "tealbrick docs context with 536 indexed docs.",
+  "upstream_map_excerpt": "---\ntitle: Tealbrick upstream map (opt2 provenance)\nproject: tealbrick\nkind: upstream-map\ncreated: 2026-10-05\nupdated: 2026-10-16\nstatus: current\nauthority: \"DECISION-LOG (Go decisions 2026-10-11, C6, C27, C53, C130, C155); coordination/qa/BUILD-STANDARD-AUDIT.md; per-app THIRD_PARTY_NOTICES\"\n---\n# Upstream map\nWhat opt2 takes from outside, and how. The local delta (what we changed or\nchose differ"
+}

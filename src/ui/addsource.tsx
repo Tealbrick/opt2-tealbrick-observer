@@ -1,10 +1,11 @@
 // "Add source" StepFlow (C126): 1-Account (and, when the account has both, messages or documents), 2-Conversations or Collections
 // (and who is never read), 3-Details, 4-History (messages only: a documents source reads everything of its collections at Start). The source is made on
 // Next of step 3 (source_add), with its live job paused: nothing is read until the owner presses Start live (DESIGN §3.2).
-import { Choices, Field, Notice, Select, StepFlow, Textarea, TextInput } from "@opt2-tealbrick/ui";
+import { accessFilter, Choices, Field, ListFilter, Notice, Select, StepFlow, Textarea, TextInput, useAccessFilter } from "@opt2-tealbrick/ui";
 import { useState } from "react";
 import { asAccount, type ConnectAccount, count, type Dataset, DOCUMENTS_SENTENCE, datasetName, everyLabel, keptSentence, kindName, plural, run, unitName } from "./api.ts";
 import { Check, Failure, useAct } from "./common.tsx";
+import { CONVERSATIONS_MOST, FILTER_FROM, filterKey } from "./filtering.ts";
 import { HistoryFields, useHistory } from "./history.tsx";
 
 /** One address, handle or domain per line: "@example.com" and "example.com" are domains, anything with a name before the @ is a sender. */
@@ -44,6 +45,14 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
   const canHistory = account !== null && !docs;
   const unit = unitName(account?.dataset ?? "messages");
   const units = unitName(account?.dataset ?? "messages", true);
+  // The filter only narrows what the list shows. It never picks anything: a conversation that is picked and hidden stays picked and counted.
+  const [find, setFind] = useAccessFilter(filterKey("addsource"));
+  const findFilter = accessFilter(find);
+  const listed = account?.conversations ?? [];
+  const shownConversations = listed.filter((c) => findFilter.test(c.title));
+  const hiddenPicked = picked.filter((id) => !shownConversations.some((c) => c.id === id)).length;
+  const listCut = listed.length >= CONVERSATIONS_MOST;
+  const showFind = listed.length >= FILTER_FROM || listCut || find.trim() !== "";
 
   const chooseAccount = (id: string, dataset?: Dataset) => {
     setAccountId(id);
@@ -137,8 +146,27 @@ function Flow({ accounts, onClose, onDone }: { accounts: ConnectAccount[]; onClo
             <div className="tb-stack">
               <h3>Which {units} may Observer read?</h3>
               <p className="tb-soft">{docs ? "Choose the folders or tables Observer needs, not everything." : "Choose labels or channels, not everything. A whole mailbox includes private mail."}</p>
+              {showFind ? (
+                <ListFilter
+                  label={`Filter the ${units}`}
+                  value={find}
+                  onChange={setFind}
+                  filter={findFilter}
+                  placeholder="Name, or a regex"
+                  noun={{ one: unit, many: units }}
+                  shown={shownConversations.length}
+                  total={listed.length}
+                  more={listCut}
+                  onClear={() => setFind("")}
+                />
+              ) : null}
+              {picked.length > 0 || hiddenPicked > 0 ? (
+                <p className="tb-soft" role="status">
+                  {picked.length} chosen{hiddenPicked > 0 ? `, ${hiddenPicked} hidden by the filter` : ""}.
+                </p>
+              ) : null}
               <div className="tb-checks">
-                {(account?.conversations ?? []).map((c) => (
+                {shownConversations.map((c) => (
                   <Check
                     key={c.id}
                     checked={picked.includes(c.id)}
