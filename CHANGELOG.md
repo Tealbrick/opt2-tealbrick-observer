@@ -2,6 +2,12 @@
 
 All notable changes to Observer. One section per released version (handbook §3.2).
 
+## 0.2.1-dev.1 (2026-11-01)
+
+C382 batch 4, DEV only. No function or CLI change; ui 0.7.0.
+
+- Holds and Receipts: a filter by agent and by text. A filter always shows "Showing N of M" and Clear. Receipts filters by agent on the server; the text filter reads the loaded rows and says so while more are not loaded, with Show older in reach. Held approvals that a filter hides are counted above the list.
+
 ## 0.2.0 (2026-10-27; C373 second brain)
 **Observer reads sources and delivers to Knowledge** (C373 second brain). Refs: C169, C230, C322(6), C373
 - S2 ingest (from the unfinished branch `wip/obs-s2-round3`, finished): Connect companion (`data_accounts_list`, `data_catalog`, `data_pull`, crud `["read"]`); the Connect port over `ctx.callApp`; messages/1 checked per row; ingest jobs `obs.live` / `obs.backfill` on the SDK runner (anchor first, one page = one transaction, cursor stored, `retryAfterS` honoured, backoff, 5 failures → failed + attention); a read Connect holds waits for Try again (no automatic recheck); history reads of what Connect kept.

@@ -5,7 +5,7 @@
   "name": "Observer",
   "summary": "Reads the conversations you choose, read only, and files what matters: classified first, then sent to Knowledge, Task Board or you.",
   "description": "Observer watches the conversations you share with it through Connect (read only) and turns them into records: grouped by thread, checked for secrets and personal data by fixed rules, and routed by your rules to Knowledge, Task Board or a person in Operator Inbox. Anything with personal data or no matching rule waits for your review. Secrets are never kept. Live reading is off until you press Start; message text is kept 30 days by default. Observer never sends, edits or deletes a message.",
-  "version": "0.2.0",
+  "version": "0.2.1-dev.1",
   "sdkMajor": 1,
   "publisher": {
     "name": "Tealbrick"
