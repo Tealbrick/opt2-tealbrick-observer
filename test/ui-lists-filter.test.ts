@@ -94,6 +94,26 @@ describe("Review filter", () => {
     assert.doesNotMatch(text(m.host), /hidden by the filter/);
   });
 
+  it("typing a filter never swaps the open record: it stays while shown; when the filter hides it, no record is open", async () => {
+    setup(10);
+    const m = await mountReview();
+    const open = () => m.host.querySelector('[aria-label="Record"] h2')?.textContent ?? null;
+    assert.equal(open(), "Thread number 1");
+    const loads = () => callsOf("review_get").map((c) => c.input.id);
+    await type(input(m.host), "number 1");
+    assert.deepEqual([...rowsOf(m.host)].map((r) => r.querySelector("b")?.textContent), ["Thread number 1", "Thread number 10"]);
+    assert.equal(open(), "Thread number 1", "still the same record while it is shown");
+    await type(input(m.host), "number 7");
+    await flush();
+    assert.equal(open(), null, "the filter hides the open record: none is open");
+    assert.match(text(m.host), /Pick a record\./);
+    assert.ok(!loads().includes("rec_7"), "no other record was opened for the owner");
+    assert.equal(buttons(m.host, "Drop").length, 0, "no decision buttons of another record");
+    await click(control(m.host, "Clear filter"));
+    await flush();
+    assert.equal(open(), "Thread number 1");
+  });
+
   it("filters by source and by reason; each record keeps its own decision buttons and there is no bulk action", async () => {
     setup(10);
     stub.sources = [

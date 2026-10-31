@@ -340,7 +340,15 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
     if (d) onCount?.(items.length);
   }, [d, items.length, onCount]);
 
-  const selected = recordId ?? rows[0]?.id ?? null;
+  // The record shown when the address names none: the first one as the list loads, then kept. Typing a filter never swaps it for
+  // another record: when the filter hides the open record, no record is shown (the page says so) until the owner picks one.
+  const [auto, setAuto] = useState<string | null>(null);
+  useEffect(() => {
+    if (d && recordId === null && (auto === null || !items.some((i) => i.id === auto))) setAuto(rows[0]?.id ?? null);
+  }, [d, recordId, items, rows, auto]);
+  const chosen = recordId ?? auto;
+  const hiddenByFilter = chosen !== null && items.some((i) => i.id === chosen) && !rows.some((i) => i.id === chosen);
+  const selected = hiddenByFilter ? null : chosen;
   const showMore = () =>
     paging.act(async () => {
       if (!cursor) return;
@@ -454,7 +462,11 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
               </div>
             ) : null}
           </nav>
-          {selected ? <Detail key={selected} id={selected} sourceLabels={d.labels} rules={d.rules} targets={d.targets} onDecided={(t) => decided(selected, t)} /> : null}
+          {selected ? (
+            <Detail key={selected} id={selected} sourceLabels={d.labels} rules={d.rules} targets={d.targets} onDecided={(t) => decided(selected, t)} />
+          ) : (
+            <p className="tb-soft">Pick a record.</p>
+          )}
         </div>
         </div>
       )}
