@@ -1,9 +1,10 @@
 // Review: records that wait for the owner (personal data, no matching rule, a possible secret). List + detail with the text and
 // the marked spans. Nothing reaches Knowledge, Task Board or Operator Inbox before the owner decides here. Mockup: build-app-observer.ts.
-import { Button, EmptyState, Notice, Segmented, Select, Tag } from "@opt2-tealbrick/ui";
+import { accessFilter, Button, EmptyState, Field, ListFilter, Notice, Segmented, Select, Tag, useAccessFilter } from "@opt2-tealbrick/ui";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { asRecord, classLabel, DESTINATIONS, destinationName, type Message, REDACTION_LABELS, type RecordDetail, type RecordSummary, type Rule, recordTitle, run, SENSITIVE, stamp } from "./api.ts";
 import { Check, ConfirmButton, Failure, LoadFailed, PageHead, RequiredApps, useAct, useLoad } from "./common.tsx";
+import { ALL, FILTER_FROM, facetChoices, filterKey } from "./filtering.ts";
 import { actionPhrase, matchPhrase } from "./rules.ts";
 
 /** Which class names a merged span when marks overlap: first wins (src/detect/redact.ts PRIORITY). */
@@ -63,6 +64,20 @@ export const UNSORTED = "Observer could not sort this record. It is held for you
 const isUnsorted = (r: Pick<RecordSummary, "problem">): boolean => r.problem === "routing_failed";
 
 /** Tags that say why a record waits. */
+/** Why a record waits, as the tags of Reasons show it: one key per tag, so the filter by reason matches what the owner reads. */
+export function reasonsOf(r: RecordSummary): { value: string; label: string }[] {
+  const out: { value: string; label: string }[] = [];
+  if (r.possibleSecret) out.push({ value: "possible_secret", label: "possible secret" });
+  if (isUnsorted(r)) out.push({ value: "could_not_sort", label: "could not sort" });
+  if (r.secret) out.push({ value: "secret_removed", label: "secret removed" });
+  const classes = Object.entries(r.pii)
+    .filter(([c, n]) => n > 0 && c !== "suspect_secret" && c !== "secret")
+    .map(([c]) => c);
+  for (const c of classes) out.push({ value: `pii:${c}`, label: classLabel(c) });
+  if (out.length === 0) out.push({ value: "no_route", label: "no route" });
+  return out;
+}
+
 export function Reasons({ r }: { r: RecordSummary }) {
   const classes = Object.entries(r.pii)
     .filter(([c, n]) => n > 0 && c !== "suspect_secret" && c !== "secret")
@@ -306,11 +321,26 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
     }
   }, [d]);
   const items = useMemo(() => (d ? [...d.items, ...more] : []), [d, more]);
+  // The filter by text, source and reason reads the records loaded so far (review_list has no filter, 50 a page): `cursor` says more wait.
+  const [query, setQuery] = useAccessFilter(filterKey("review"));
+  const [sourceRaw, setSource] = useAccessFilter(filterKey("review:source"));
+  const [reasonRaw, setReason] = useAccessFilter(filterKey("review:reason"));
+  const source = sourceRaw === ALL ? "" : sourceRaw;
+  const reason = reasonRaw === ALL ? "" : reasonRaw;
+  const textFilter = accessFilter(query);
+  const rows = items.filter(
+    (r) =>
+      (source === "" || r.source === source) &&
+      (reason === "" || reasonsOf(r).some((x) => x.value === reason)) &&
+      textFilter.test([recordTitle(r, d?.labels.get(r.source)), d?.labels.get(r.source) ?? "A removed source", ...reasonsOf(r).map((x) => x.label)].join(" ")),
+  );
+  const filterOn = query.trim() !== "" || source !== "" || reason !== "";
+  const showBar = d !== null && (items.length >= FILTER_FROM || cursor !== null || filterOn);
   useEffect(() => {
     if (d) onCount?.(items.length);
   }, [d, items.length, onCount]);
 
-  const selected = recordId ?? items[0]?.id ?? null;
+  const selected = recordId ?? rows[0]?.id ?? null;
   const showMore = () =>
     paging.act(async () => {
       if (!cursor) return;
@@ -321,8 +351,8 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
 
   const decided = (id: string, text: string) => {
     setMessage(text);
-    const at = items.findIndex((i) => i.id === id);
-    const next = items[at + 1] ?? items[at - 1];
+    const at = rows.findIndex((i) => i.id === id);
+    const next = rows[at + 1] ?? rows[at - 1];
     onOpen(next && next.id !== id ? next.id : null);
     void ctx.reload();
   };
@@ -350,9 +380,52 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
       ) : items.length === 0 ? (
         <EmptyState title="Nothing waits for you">Records with personal data, a possible secret or no matching route appear here.</EmptyState>
       ) : (
+        <div className="tb-stack">
+          {showBar ? (
+            <ListFilter
+              label="Filter the records"
+              value={query}
+              onChange={setQuery}
+              filter={textFilter}
+              placeholder="Title, source, or a regex"
+              noun={{ one: "record", many: "records" }}
+              shown={rows.length}
+              total={items.length}
+              facets={source !== "" || reason !== ""}
+              more={cursor !== null}
+              loadedOnly={filterOn}
+              onClear={() => {
+                setQuery("");
+                setSource("");
+                setReason("");
+              }}
+              onLoadMore={() => void showMore()}
+              loadMoreLabel="Show more"
+              loadingMore={paging.busy}
+              hidden={items.length - rows.length}
+              hiddenNoun={{ one: "record that waits for your decision", many: "records that wait for your decision" }}
+            >
+              <Field label="Source">
+                <Select
+                  aria-label="Source"
+                  options={facetChoices("All sources", [...d.labels].map(([value, label]) => ({ value, label })), source, "A source that is removed")}
+                  value={source === "" ? ALL : source}
+                  onValueChange={(v) => setSource(v === ALL ? "" : v)}
+                />
+              </Field>
+              <Field label="Reason">
+                <Select
+                  aria-label="Reason"
+                  options={facetChoices("All reasons", items.flatMap(reasonsOf), reason, "A reason no record has now")}
+                  value={reason === "" ? ALL : reason}
+                  onValueChange={(v) => setReason(v === ALL ? "" : v)}
+                />
+              </Field>
+            </ListFilter>
+          ) : null}
         <div className="ob-split">
           <nav className="ruled ob-list" aria-label="Records waiting">
-            {items.map((r) => (
+            {rows.map((r) => (
               <a
                 key={r.id}
                 className={`ob-row${r.id === selected ? " is-sel" : ""}`}
@@ -382,6 +455,7 @@ export function ReviewPage({ recordId, onOpen, hrefOf, onCount }: { recordId: st
             ) : null}
           </nav>
           {selected ? <Detail key={selected} id={selected} sourceLabels={d.labels} rules={d.rules} targets={d.targets} onDecided={(t) => decided(selected, t)} /> : null}
+        </div>
         </div>
       )}
     </section>

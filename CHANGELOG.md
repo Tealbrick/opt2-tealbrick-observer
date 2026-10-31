@@ -7,6 +7,8 @@ All notable changes to Observer. One section per released version (handbook §3.
 C382 batch 4, DEV only. No function or CLI change; ui 0.7.0.
 
 - Holds and Receipts: a filter by agent and by text. A filter always shows "Showing N of M" and Clear. Receipts filters by agent on the server; the text filter reads the loaded rows and says so while more are not loaded, with Show older in reach. Held approvals that a filter hides are counted above the list.
+- Review: a filter by text, source and reason. The filter reads the records loaded so far (50 a page) and says so, with Show more in reach. Records that wait for a decision and the filter hides are counted. Each record stays its own decision.
+- Add source: a filter on the conversations or collections of an account. The filter only narrows the list: there is no select all. A conversation that is picked and hidden by the filter stays picked and is counted ("N chosen, M hidden by the filter").
 
 ## 0.2.0 (2026-10-27; C373 second brain)
 **Observer reads sources and delivers to Knowledge** (C373 second brain). Refs: C169, C230, C322(6), C373
