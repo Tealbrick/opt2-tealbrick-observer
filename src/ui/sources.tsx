@@ -20,6 +20,7 @@ function liveStatus(job: Job | undefined, source: Source): { tone: Tone; text: s
     case "queued":
       return { tone: "busy", text: "Starting", hint: "waits for the next read" };
     case "waiting":
+      if (job?.held) return { tone: "needs-you", text: "Held", hint: "approve the read in Holds, then press Try again" };
       return { tone: "busy", text: "Waiting", hint: retry ? `retry ${until(retry)}` : "retrying soon" };
     case "paused":
       return { tone: "idle", text: "Paused", hint: "press Start live to begin" };
@@ -124,6 +125,11 @@ function SourceCard({
       {hist?.lastError && hist.state === "waiting" ? <p className="tb-hint">History: {hist.lastError}</p> : null}
       {live?.note ? <p className="tb-hint">{live.note}</p> : null}
       <div className="tb-ctas">
+        {live?.held ? (
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => onJob(live, "resume")}>
+            Try again
+          </Button>
+        ) : null}
         {live && ["running", "queued", "waiting"].includes(live.state) ? (
           <Button size="sm" disabled={busy} onClick={() => onJob(live, "pause")}>
             Pause live
@@ -137,6 +143,11 @@ function SourceCard({
         {live?.state === "failed" ? (
           <Button size="sm" variant="primary" disabled={busy} onClick={() => onJob(live, "resume")}>
             Try live again
+          </Button>
+        ) : null}
+        {hist?.held ? (
+          <Button size="sm" variant="primary" disabled={busy} onClick={() => onJob(hist, "resume")}>
+            Try history again
           </Button>
         ) : null}
         {histActive ? (
