@@ -52,6 +52,18 @@ describe("Sources", () => {
     assert.ok(!(card(m.host, "Clinic partners").textContent ?? "").includes("restarted"), "quiet on good: no note, no line");
     await m.unmount();
   });
+  it("a read Connect holds says Held and has a working Try again button", async () => {
+    reset();
+    stub.jobs = (stub.jobs as Record<string, unknown>[]).map((j) => (j.id === "job_tg_live" ? { ...j, held: true, retryAt: null, lastError: "Connect holds this read for your approval." } : j));
+    const m = await mount(h(await page(), {}));
+    const tg = card(m.host, "Clinic partners");
+    assert.deepEqual([...tg.querySelectorAll(".tb-tag")].map((t) => t.textContent), ["Held"]);
+    assert.match(tg.textContent ?? "", /approve the read in Holds, then press Try again/);
+    await click(control(tg, "Try again"));
+    await flush();
+    assert.deepEqual(lastCall("job_control").input, { id: "job_tg_live", action: "resume" });
+    await m.unmount();
+  });
   it("Read history… on a source without history says what Connect kept and how far back it reaches", async () => {
     reset();
     const m = await mount(h(await page(), {}));
